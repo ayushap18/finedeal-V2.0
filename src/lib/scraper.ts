@@ -331,7 +331,7 @@ export async function scrapeProduct(url: string): Promise<ScrapeResult> {
 const SEARCH_URLS: Record<PlatformKey, (q: string) => string> = {
   amazon: (q) => `https://www.amazon.in/s?k=${encodeURIComponent(q)}`,
   flipkart: (q) => `https://www.flipkart.com/search?q=${encodeURIComponent(q)}`,
-  croma: (q) => `https://www.croma.com/searchB?q=${encodeURIComponent(q)}`,
+  croma: (q) => `https://www.croma.com/search/?text=${encodeURIComponent(q)}`,
   myntra: (q) => `https://www.myntra.com/${encodeURIComponent(q.replace(/\s+/g, "-"))}`,
   ajio: (q) => `https://www.ajio.com/search/?text=${encodeURIComponent(q)}&classifier=intent`,
   snapdeal: (q) => `https://www.snapdeal.com/search?keyword=${encodeURIComponent(q)}`,
@@ -470,12 +470,22 @@ function parseGenericSearch(html: string, query: string, platform: string, url: 
 // --- Flipkart Internal API (bypasses HTML scraping blocks) ---
 
 async function searchFlipkartAPI(query: string): Promise<ScrapeResult> {
+  const url = `https://www.flipkart.com/search?q=${encodeURIComponent(query)}`;
+
+  // Try Playwright browser first (most reliable for Flipkart)
+  try {
+    const { searchWithBrowser } = await import("./browser-scraper");
+    const result = await searchWithBrowser(query, "flipkart");
+    if (result.price && result.price > 0) return result;
+  } catch { /* fall through to API */ }
+
+  // Fallback: Flipkart internal API
   try {
     const res = await fetch("https://2.rome.api.flipkart.com/api/4/page/fetch", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 FKUA/website/42/website/Desktop",
+        "X-User-Agent": "Mozilla/5.0 FKUA/website/42/website/Desktop",
         "User-Agent": randomUA(),
       },
       body: JSON.stringify({
@@ -488,7 +498,6 @@ async function searchFlipkartAPI(query: string): Promise<ScrapeResult> {
     if (!res.ok) throw new Error(`Flipkart API ${res.status}`);
     const text = await res.text();
 
-    // Extract product cards with name+price pairs
     const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
     const nameMatches = text.match(/"title":\{"value":"([^"]+)"/g) || [];
     const priceMatches = text.match(/"finalPrice":\{"decimalValue":"(\d+)"/g) || [];
@@ -497,15 +506,13 @@ async function searchFlipkartAPI(query: string): Promise<ScrapeResult> {
     let bestName = query;
     let bestRelevance = 0;
 
-    // Try to pair names with prices and find the most relevant match
     const names = nameMatches.map(m => { const r = m.match(/"value":"([^"]+)"/); return r?.[1] ?? ""; }).filter(n => n.length > 5);
     const prices = priceMatches.map(m => { const r = m.match(/"(\d+)"$/); return r ? parseInt(r[1]) : 0; }).filter(p => p > 500);
 
-    for (let i = 0; i < Math.min(names.length, prices.length); i++) {
+    for (let i = 0; i < Math.min(names.length, prices.length, 10); i++) {
       const nameLower = names[i].toLowerCase();
       const matchCount = queryWords.filter(w => nameLower.includes(w)).length;
       const relevance = matchCount / queryWords.length;
-
       if (relevance > bestRelevance && prices[i] > 500) {
         bestRelevance = relevance;
         bestPrice = prices[i];
@@ -513,7 +520,6 @@ async function searchFlipkartAPI(query: string): Promise<ScrapeResult> {
       }
     }
 
-    // If no good match, just take the first reasonable price
     if (!bestPrice && prices.length > 0) {
       bestPrice = prices[0];
       if (names.length > 0) bestName = names[0];
@@ -523,75 +529,62 @@ async function searchFlipkartAPI(query: string): Promise<ScrapeResult> {
       name: bestName,
       price: bestPrice,
       platform: "Flipkart",
-      url: `https://www.flipkart.com/search?q=${encodeURIComponent(query)}`,
+      url,
       scrapedAt: new Date().toISOString(),
-      error: bestPrice ? undefined : "No price found in Flipkart API response",
+      error: bestPrice ? undefined : "No price in Flipkart response",
     };
-  } catch { /* API failed, fall through to browser */ }
-
-  // Fallback to browser scraping
-  try {
-    const { searchWithBrowser } = await import("./browser-scraper");
-    return await searchWithBrowser(query, "flipkart");
   } catch {
-    return { name: query, price: null, platform: "Flipkart", url: `https://www.flipkart.com/search?q=${encodeURIComponent(query)}`, scrapedAt: new Date().toISOString(), error: "Flipkart API and browser both failed" };
+    return { name: query, price: null, platform: "Flipkart", url, scrapedAt: new Date().toISOString(), error: "Flipkart search failed" };
   }
 }
 
 // --- Croma API search ---
 
 async function searchCromaAPI(query: string): Promise<ScrapeResult> {
-  try {
-    const url = `https://api.croma.com/searchservices/v1/search?currentPage=0&query=${encodeURIComponent(query)}&pageSize=5`;
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": randomUA(),
-        "Accept": "application/json",
-        "Origin": "https://www.croma.com",
-        "Referer": "https://www.croma.com/",
-      },
-    });
+  // Try multiple Croma URL patterns
+  const urls = [
+    `https://www.croma.com/search/?text=${encodeURIComponent(query)}`,
+    `https://www.croma.com/searchB?q=${encodeURIComponent(query)}`,
+  ];
 
-    if (res.ok) {
-      const data = await res.json();
-      const products = data.products || [];
-      if (products.length > 0) {
-        const p = products[0];
-        return {
-          name: p.name || query,
-          price: p.price?.value || null,
-          platform: "Croma",
-          url: `https://www.croma.com${p.url || "/searchB?q=" + encodeURIComponent(query)}`,
-          scrapedAt: new Date().toISOString(),
-        };
+  for (const url of urls) {
+    try {
+      const html = await fetchHtml(url, "croma");
+      // Extract prices with multiple patterns
+      const priceMatches: number[] = [];
+      const priceRegex = /₹\s*([\d,]+)/g;
+      let m;
+      while ((m = priceRegex.exec(html)) !== null) {
+        const p = cleanPrice(m[1]);
+        if (p && p > 500 && p < 10000000) priceMatches.push(p);
       }
-    }
-  } catch { /* fall through */ }
 
-  // Fallback to HTML scraping
-  try {
-    const html = await fetchHtml(`https://www.croma.com/searchB?q=${encodeURIComponent(query)}`, "croma");
-    // Try multiple price patterns for Croma
-    const priceRaw =
-      extractFirst(html, /₹([\d,]+)/i) ??
-      extractFirst(html, /<span[^>]*class="[^"]*amount[^"]*"[^>]*>([^<]+)<\/span>/i) ??
-      extractFirst(html, /"price":\s*"?([\d,]+)"?/i);
-    const nameRaw = extractFirst(html, /<title[^>]*>([\s\S]*?)<\/title>/i) ?? query;
-    return {
-      name: nameRaw.replace(/\s+/g, " ").replace(/ - Croma$| Buy Online.*$/i, "").trim(),
-      price: priceRaw ? cleanPrice(priceRaw) : null,
-      platform: "Croma",
-      url: `https://www.croma.com/searchB?q=${encodeURIComponent(query)}`,
-      scrapedAt: new Date().toISOString(),
-    };
-  } catch { /* HTML scraping failed, fall through to browser */ }
+      // Also try data attributes and JSON
+      const jsonPriceMatch = html.match(/"price":\s*"?([\d,]+)"?/);
+      if (jsonPriceMatch) {
+        const jp = cleanPrice(jsonPriceMatch[1]);
+        if (jp && jp > 500) priceMatches.push(jp);
+      }
 
-  // Fallback to browser
+      if (priceMatches.length > 0) {
+        // Get median price (most reliable)
+        priceMatches.sort((a, b) => a - b);
+        const price = priceMatches[Math.floor(priceMatches.length / 2)];
+
+        const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+        const name = titleMatch ? titleMatch[1].replace(/ - Croma.*| \| .*| Buy .*/gi, "").trim() : query;
+
+        return { name, price, platform: "Croma", url, scrapedAt: new Date().toISOString() };
+      }
+    } catch { continue; }
+  }
+
+  // Browser fallback
   try {
     const { searchWithBrowser } = await import("./browser-scraper");
     return await searchWithBrowser(query, "croma");
   } catch {
-    return { name: query, price: null, platform: "Croma", url: "", scrapedAt: new Date().toISOString(), error: "Croma scraping failed" };
+    return { name: query, price: null, platform: "Croma", url: urls[0], scrapedAt: new Date().toISOString(), error: "Croma: no prices found" };
   }
 }
 

@@ -72,6 +72,31 @@ async function handleComparePrices(data) {
   if (!product) return { success: false, error: 'No product detected' };
 
   try {
+    // Fast path: check DB for existing price data first
+    let cachedResults = [];
+    try {
+      const dbResp = await fetch(`${API_BASE}/products?search=${encodeURIComponent(product.title.substring(0, 40))}`);
+      if (dbResp.ok) {
+        const dbData = await dbResp.json();
+        if (dbData.products && dbData.products.length > 0) {
+          cachedResults = dbData.products
+            .filter(p => p.current_price > 0)
+            .map(p => ({
+              id: p.id,
+              title: p.name,
+              price: p.current_price,
+              originalPrice: p.original_price || 0,
+              site: p.platform || 'Unknown',
+              url: p.url || '',
+              image: '',
+              rating: null,
+              inStock: true,
+              discount: p.original_price > p.current_price ? Math.round((1 - p.current_price / p.original_price) * 100) : 0,
+            }));
+        }
+      }
+    } catch { /* DB check is best-effort */ }
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
 
@@ -150,6 +175,26 @@ async function handleComparePrices(data) {
     return { success: true, ...comparisonData };
   } catch (err) {
     console.error('[FineDeal BG] Compare error:', err);
+    // If we have cached results, return those instead of failing
+    if (cachedResults.length > 0) {
+      cachedResults.sort((a, b) => a.price - b.price);
+      const prices = cachedResults.map(r => r.price);
+      const lowestPrice = Math.min(...prices);
+      const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
+      return {
+        success: true,
+        results: cachedResults,
+        stats: {
+          lowestPrice,
+          averagePrice: Math.round(avgPrice),
+          sitesFound: cachedResults.length,
+          dealScore: Math.min(99, Math.round(((avgPrice - lowestPrice) / avgPrice) * 100 + 50)),
+          lowestEver: lowestPrice,
+        },
+        cached: true,
+        timestamp: Date.now(),
+      };
+    }
     return { success: false, error: 'Failed to fetch price comparison: ' + err.message };
   }
 }

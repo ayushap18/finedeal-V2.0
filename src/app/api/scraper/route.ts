@@ -79,6 +79,20 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // === PHASE 1.5: Price variance filter ===
+    // If multiple results exist, reject prices that are suspiciously low (>80% below median)
+    const validPrices = results.filter(r => r.price && r.price > 0).map(r => r.price!);
+    if (validPrices.length >= 2) {
+      validPrices.sort((a, b) => a - b);
+      const median = validPrices[Math.floor(validPrices.length / 2)];
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        if (r.price && r.price < median * 0.2) {
+          results[i] = { ...r, price: null, error: `Suspicious price ₹${r.price} (80%+ below median ₹${median})` };
+        }
+      }
+    }
+
     // === PHASE 2: AI Validation with Groq (fast) ===
     // Validate that returned products actually match the search query
     if (query && results.some(r => r.price)) {

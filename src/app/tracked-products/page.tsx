@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
+import Link from "next/link";
 
 interface Product {
   id: string;
@@ -299,7 +300,9 @@ export default function TrackedProductsPage() {
                 className="flex items-center px-5 py-4 border-t border-border hover:bg-bg-sidebar/50 transition-colors"
               >
                 <span className="w-[240px] text-text-primary text-sm font-medium truncate pr-3">
-                  {product.name}
+                  <Link href={`/product/${product.id}`} className="hover:text-accent transition-colors">
+                    {product.name}
+                  </Link>
                 </span>
                 <span className="w-[100px]">
                   <span
@@ -334,6 +337,12 @@ export default function TrackedProductsPage() {
                   )}
                 </span>
                 <span className="flex-1 flex items-center justify-end gap-2">
+                  <Link
+                    href={`/product/${product.id}`}
+                    className="px-2.5 py-1 rounded-md bg-accent/10 text-accent text-xs font-medium hover:opacity-80 transition-opacity"
+                  >
+                    View
+                  </Link>
                   <button
                     onClick={() => handleScrapeNow(product)}
                     disabled={scrapingId === product.id}
