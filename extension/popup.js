@@ -49,26 +49,79 @@
 
   // ===== Initialize =====
   async function init() {
-    // Try to get current product from background
+    // Step 1: Try to get cached product from background
     const resp = await sendMessage({ type: 'GET_PRODUCT' });
     if (resp.success && resp.product && resp.product.title) {
       currentProduct = resp.product;
       renderProductDetected();
       showScreen('detected');
     } else {
-      // Try from storage
+      // Step 2: Try from chrome storage
       const stored = await chrome.storage.local.get(['currentProduct', 'lastDetected']);
       if (stored.currentProduct && stored.currentProduct.title) {
         currentProduct = stored.currentProduct;
         renderProductDetected();
         showScreen('detected');
       } else {
-        showScreen('empty');
+        // Step 3: Try to actively detect from current tab
+        try {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tab && tab.id) {
+            chrome.tabs.sendMessage(tab.id, { type: 'DETECT_PRODUCT' }, (response) => {
+              if (chrome.runtime.lastError) {
+                // Content script not loaded on this page
+                showScreen('empty');
+                return;
+              }
+              if (response && response.product && response.product.title) {
+                currentProduct = response.product;
+                renderProductDetected();
+                showScreen('detected');
+              } else {
+                showScreen('empty');
+              }
+            });
+          } else {
+            showScreen('empty');
+          }
+        } catch {
+          showScreen('empty');
+        }
       }
     }
 
     bindEvents();
     initSettings();
+
+    // Manual search handler
+    const searchBtn = document.getElementById('manual-search-btn');
+    const searchInput = document.getElementById('manual-search-input');
+    if (searchBtn && searchInput) {
+      const doSearch = () => {
+        const query = searchInput.value.trim();
+        if (!query) return;
+        currentProduct = {
+          title: query,
+          price: 0,
+          site: 'Manual Search',
+          domain: '',
+          url: '',
+          image: '',
+          brand: '',
+          category: ''
+        };
+        document.getElementById('product-title').textContent = query;
+        document.getElementById('product-price').textContent = 'Searching...';
+        document.getElementById('product-site').textContent = 'All Sites';
+        showScreen('detected');
+        // Auto-start comparison
+        startSearch();
+      };
+      searchBtn.onclick = doSearch;
+      searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') doSearch();
+      });
+    }
   }
 
   // ===== Screen 1: Product Detected =====

@@ -244,6 +244,24 @@
     }, 1500);
   }
 
+  // Listen for active detection requests from popup
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.type === 'DETECT_PRODUCT') {
+      const site = getCurrentSite();
+      if (site && site.isProductPage()) {
+        const product = extractProductInfo(site);
+        if (product.title) {
+          const data = { ...product, site: site.name, domain: site.domain, url: window.location.href };
+          // Also send to background
+          chrome.runtime.sendMessage({ type: 'PRODUCT_DETECTED', data });
+          sendResponse({ product: data });
+          return;
+        }
+      }
+      sendResponse({ product: null });
+    }
+  });
+
   // Run on load
   if (document.readyState === 'complete') {
     detectAndSend();

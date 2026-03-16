@@ -330,7 +330,19 @@
         <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
       </div>
       <h2 class="empty-title">No Product Detected</h2>
-      <p class="empty-text">Visit a product page on any supported site to start comparing prices.</p>
+      <p class="empty-text">Visit a product page on any supported site, or search manually below.</p>
+
+      <div class="manual-search" style="width:100%;margin:16px 0;">
+        <div style="display:flex;gap:8px;">
+          <input type="text" id="manual-search-input" placeholder="Search any product..."
+            style="flex:1;background:#141414;border:1px solid #1F1F1F;border-radius:8px;padding:10px 14px;color:#FAF8F5;font-size:13px;outline:none;font-family:Manrope,sans-serif;">
+          <button id="manual-search-btn"
+            style="background:#F97316;color:#0A0A0A;border:none;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:600;font-size:13px;font-family:Manrope,sans-serif;">
+            Search
+          </button>
+        </div>
+      </div>
+
       <div class="supported-sites">
         <span class="site-pill">Amazon</span>
         <span class="site-pill">Flipkart</span>
