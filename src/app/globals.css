@@ -1,0 +1,56 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@200..800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-accent: #F97316;
+  --color-accent-hover: #FB923C;
+  --color-accent-tint: #F9731620;
+  --color-accent-tint-strong: #F9731640;
+  --color-bg-card: #1A1A1A;
+  --color-bg-input: #141414;
+  --color-bg-page: #0F0F0F;
+  --color-bg-sidebar: #0A0A0A;
+  --color-border: #1F1F1F;
+  --color-border-hover: #2A2A2A;
+  --color-error: #F87171;
+  --color-error-tint: #F8717120;
+  --color-info: #60A5FA;
+  --color-info-tint: #60A5FA20;
+  --color-success: #4ADE80;
+  --color-success-tint: #4ADE8020;
+  --color-text-on-accent: #0A0A0A;
+  --color-text-primary: #FAF8F5;
+  --color-text-secondary: #888888;
+  --color-text-tertiary: #666666;
+  --color-warning: #FBBF24;
+  --color-warning-tint: #FBBF2420;
+  --color-purple: #A855F7;
+  --color-purple-tint: #A855F720;
+  --color-pink: #EC4899;
+  --color-pink-tint: #EC489920;
+  --color-blue: #3B82F6;
+  --color-blue-tint: #3B82F620;
+  --color-green: #22C55E;
+  --color-green-tint: #22C55E20;
+  --color-yellow: #EAB308;
+  --color-yellow-tint: #EAB30820;
+  --color-red: #EF4444;
+  --color-red-tint: #EF444420;
+  --color-sidebar-active: #111111;
+  --color-text-muted: #AAAAAA;
+  --color-text-light: #CCCCCC;
+  --color-text-dim: #555555;
+  --color-text-placeholder: #444444;
+  --font-sans: 'Manrope', system-ui, sans-serif;
+}
+
+body {
+  background-color: var(--color-bg-page);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #333 transparent;
+}
