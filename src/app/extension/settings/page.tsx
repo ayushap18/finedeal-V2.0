@@ -156,7 +156,7 @@ export default function SettingsPage() {
 
           <div className="flex items-center justify-between rounded-lg border border-border bg-bg-card px-3 py-3">
             <p className="text-sm text-text-secondary">FineDeal v4.0.0</p>
-            <button className="text-xs font-medium text-warning">Clear Cache</button>
+            <button onClick={() => { try { const c = (globalThis as unknown as { chrome?: { storage?: { local?: { clear: () => void } } } }).chrome; if (c?.storage?.local) c.storage.local.clear(); } catch {} localStorage.clear(); window.alert("Cache cleared!"); }} className="text-xs font-medium text-warning">Clear Cache</button>
           </div>
         </div>
       </div>

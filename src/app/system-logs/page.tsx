@@ -89,9 +89,9 @@ export default function SystemLogsPage() {
         .then((data) => {
           if (data.logs) {
             setLogs(
-              data.logs.map((l: ApiLog) => ({
-                timestamp: l.timestamp
-                  ? new Date(l.timestamp).toLocaleTimeString("en-US", { hour12: false })
+              data.logs.map((l: ApiLog & { created_at?: string }) => ({
+                timestamp: (l.timestamp || l.created_at)
+                  ? new Date(l.timestamp || l.created_at || "").toLocaleTimeString("en-US", { hour12: false })
                   : "--:--:--",
                 level: (l.level?.toUpperCase() ?? "INFO") as LogLevel,
                 message: l.message ?? "",

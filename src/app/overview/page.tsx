@@ -24,21 +24,22 @@ export default function OverviewPage() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(() => {
-    fetch("/api/analytics").then(r => r.json()).then(d => {
-      if (d.stats) setStats({ products: d.stats.total_products ?? 0, alerts: d.stats.active_alerts ?? 0, drops: d.stats.price_drops_today ?? 0, accuracy: d.stats.ai_accuracy ?? 0 });
-      if (d.weekly_data?.length) {
-        const mx = Math.max(...d.weekly_data.map((x: { scrapes: number }) => x.scrapes ?? 0), 1);
-        setBarData(d.weekly_data.map((x: { day: string; scrapes: number }) => ({ day: x.day, height: Math.round(((x.scrapes ?? 0) / mx) * 100) })));
-      }
-    }).catch(() => {});
-    fetch("/api/ai").then(r => r.json()).then(d => {
-      setAiStatus({ groq: d.connectivity?.groq?.status ?? "unknown", gemini: d.connectivity?.gemini?.status ?? "unknown", groqModel: d.connectivity?.groq?.model ?? "", geminiModel: d.connectivity?.gemini?.model ?? "" });
-    }).catch(() => {});
-    fetch("/api/users").then(r => r.json()).then(d => {
-      setUsers(d.users ?? []);
-      setUserStats(d.stats ?? { total: 0, active: 0, with_email: 0, with_telegram: 0 });
-    }).catch(() => {});
-    setLoading(false);
+    Promise.all([
+      fetch("/api/analytics").then(r => r.json()).then(d => {
+        if (d.stats) setStats({ products: d.stats.total_products ?? 0, alerts: d.stats.active_alerts ?? 0, drops: d.stats.price_drops_today ?? 0, accuracy: d.stats.ai_accuracy ?? 0 });
+        if (d.weekly_data?.length) {
+          const mx = Math.max(...d.weekly_data.map((x: { scrapes: number }) => x.scrapes ?? 0), 1);
+          setBarData(d.weekly_data.map((x: { day: string; scrapes: number }) => ({ day: x.day, height: Math.round(((x.scrapes ?? 0) / mx) * 100) })));
+        }
+      }).catch(() => { setFeedback("Failed to load analytics"); }),
+      fetch("/api/ai").then(r => r.json()).then(d => {
+        setAiStatus({ groq: d.connectivity?.groq?.status ?? "unknown", gemini: d.connectivity?.gemini?.status ?? "unknown", groqModel: d.connectivity?.groq?.model ?? "", geminiModel: d.connectivity?.gemini?.model ?? "" });
+      }).catch(() => {}),
+      fetch("/api/users").then(r => r.json()).then(d => {
+        setUsers(d.users ?? []);
+        setUserStats(d.stats ?? { total: 0, active: 0, with_email: 0, with_telegram: 0 });
+      }).catch(() => {}),
+    ]).finally(() => setLoading(false));
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -100,9 +101,14 @@ export default function OverviewPage() {
 
   const checkSites = async () => {
     setSiteHealth([]); setShowModal("sites");
-    const res = await fetch("/api/scraper/health");
-    const d = await res.json();
-    setSiteHealth(d.sites ?? []);
+    try {
+      const res = await fetch("/api/scraper/health");
+      const d = await res.json();
+      setSiteHealth(d.sites ?? []);
+    } catch {
+      setFeedback("Failed to check site health");
+      setShowModal("");
+    }
   };
 
   const pollBot = async () => {

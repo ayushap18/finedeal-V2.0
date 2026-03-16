@@ -40,7 +40,7 @@ export default function ResultsPage() {
               const bestPrice = data.lastResults.filter((x: { price: number | null }) => x.price).sort((a: { price: number }, b: { price: number }) => a.price - b.price)[0]?.price ?? r.price;
               return {
                 site: r.platform,
-                score: `${Math.floor(90 + Math.random() * 10)}%`,
+                score: bestPrice > 0 ? `${Math.max(0, Math.round(100 - ((r.price - bestPrice) / bestPrice) * 100))}%` : "—",
                 title: r.name,
                 price: `₹${r.price.toLocaleString("en-IN")}`,
                 priceNum: r.price,
@@ -66,7 +66,11 @@ export default function ResultsPage() {
       .then((res) => res.json())
       .then((data) => {
         if (data.result?.recommendation) {
-          setAiScore((7 + Math.random() * 2.5).toFixed(1));
+          // Calculate score from price spread: closer prices = better deal
+          const bestP = prices[0]?.priceNum ?? 0;
+          const avgP = prices.length > 0 ? prices.reduce((s, p) => s + p.priceNum, 0) / prices.length : 0;
+          const spread = avgP > 0 ? ((avgP - bestP) / avgP) * 10 : 5;
+          setAiScore(Math.min(9.9, 5 + spread).toFixed(1));
         }
       })
       .catch(() => {});

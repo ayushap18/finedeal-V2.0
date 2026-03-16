@@ -116,9 +116,11 @@ export default function AlertsPage() {
   const [alerts, setAlerts] = useState<AlertItem[]>(defaultAlerts);
   const [loading, setLoading] = useState(true);
   const [showNewAlert, setShowNewAlert] = useState(false);
+  const [products, setProducts] = useState<{ id: string; name: string; platform: string; current_price: number }[]>([]);
   const [newAlertForm, setNewAlertForm] = useState({
-    product: "",
+    product_id: "",
     targetPrice: "",
+    alert_type: "target_price" as string,
     email: true,
     telegram: false,
   });
@@ -165,17 +167,25 @@ export default function AlertsPage() {
 
   useEffect(() => {
     fetchAlerts();
+    fetch("/api/products").then(r => r.json()).then(d => {
+      if (d.products) setProducts(d.products.map((p: { id: string; name: string; platform: string; current_price: number }) => ({ id: p.id, name: p.name, platform: p.platform, current_price: p.current_price })));
+    }).catch(() => {});
   }, []);
 
   const handleCreateAlert = async () => {
-    if (!newAlertForm.product.trim() || !newAlertForm.targetPrice.trim()) return;
+    if (!newAlertForm.product_id || !newAlertForm.targetPrice.trim()) return;
     setAddLoading(true);
+    const selectedProduct = products.find(p => p.id === newAlertForm.product_id);
     try {
       const res = await fetch("/api/alerts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          product_name: newAlertForm.product,
+          product_id: newAlertForm.product_id,
+          product_name: selectedProduct?.name ?? "",
+          platform: selectedProduct?.platform ?? "",
+          current_price: selectedProduct?.current_price ?? 0,
+          alert_type: newAlertForm.alert_type,
           target_value: parseFloat(newAlertForm.targetPrice),
           notify_email: newAlertForm.email,
           notify_telegram: newAlertForm.telegram,
@@ -183,7 +193,7 @@ export default function AlertsPage() {
       });
       if (res.ok) {
         setShowNewAlert(false);
-        setNewAlertForm({ product: "", targetPrice: "", email: true, telegram: false });
+        setNewAlertForm({ product_id: "", targetPrice: "", alert_type: "target_price", email: true, telegram: false });
         fetchAlerts();
       } else {
         const data = await res.json();
@@ -407,26 +417,45 @@ export default function AlertsPage() {
             <div className="space-y-4">
               <div>
                 <label className="block text-xs font-medium text-text-secondary mb-1.5">
-                  Product Name *
+                  Product *
                 </label>
-                <input
-                  type="text"
-                  value={newAlertForm.product}
-                  onChange={(e) => setNewAlertForm((f) => ({ ...f, product: e.target.value }))}
-                  placeholder="e.g. Samsung Galaxy S24 Ultra"
-                  className="w-full bg-bg-input border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-placeholder outline-none focus:border-accent"
-                />
+                <select
+                  value={newAlertForm.product_id}
+                  onChange={(e) => setNewAlertForm((f) => ({ ...f, product_id: e.target.value }))}
+                  className="w-full bg-bg-input border border-border rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-accent"
+                >
+                  <option value="">Select a product...</option>
+                  {products.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name} ({p.platform})</option>
+                  ))}
+                </select>
               </div>
 
               <div>
                 <label className="block text-xs font-medium text-text-secondary mb-1.5">
-                  Target Price (INR) *
+                  Alert Type *
+                </label>
+                <select
+                  value={newAlertForm.alert_type}
+                  onChange={(e) => setNewAlertForm((f) => ({ ...f, alert_type: e.target.value }))}
+                  className="w-full bg-bg-input border border-border rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-accent"
+                >
+                  <option value="target_price">Target Price</option>
+                  <option value="price_drop">Any Price Drop</option>
+                  <option value="percentage_drop">Percentage Drop</option>
+                  <option value="back_in_stock">Back in Stock</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-text-secondary mb-1.5">
+                  Target Value (INR or %) *
                 </label>
                 <input
                   type="number"
                   value={newAlertForm.targetPrice}
                   onChange={(e) => setNewAlertForm((f) => ({ ...f, targetPrice: e.target.value }))}
-                  placeholder="85000"
+                  placeholder={newAlertForm.alert_type === "percentage_drop" ? "15" : "85000"}
                   className="w-full bg-bg-input border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-placeholder outline-none focus:border-accent"
                 />
               </div>
@@ -467,7 +496,7 @@ export default function AlertsPage() {
               </button>
               <button
                 onClick={handleCreateAlert}
-                disabled={addLoading || !newAlertForm.product.trim() || !newAlertForm.targetPrice.trim()}
+                disabled={addLoading || !newAlertForm.product_id || !newAlertForm.targetPrice.trim()}
                 className="flex-1 px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
               >
                 {addLoading ? "Creating..." : "Create Alert"}

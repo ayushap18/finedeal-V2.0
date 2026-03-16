@@ -16,6 +16,7 @@ interface TrendingProduct {
   fire?: boolean;
   rawPrice?: number;
   rawOriginal?: number;
+  category?: string;
 }
 
 const badgeStyles = [
@@ -27,7 +28,7 @@ const badgeStyles = [
   { bg: "bg-pink-tint", text: "text-pink" },
 ];
 
-const categories = ["All", "Electronics", "Mobile", "Fashion"];
+const defaultCategories = ["All", "Electronics", "Mobile", "Fashion"];
 
 export default function TrendingPage() {
   const [products, setProducts] = useState<TrendingProduct[]>([]);
@@ -67,6 +68,7 @@ export default function TrendingPage() {
                   current_price: number;
                   original_price: number;
                   lowest_price: number;
+                  category?: string;
                 },
                 i: number
               ) => {
@@ -91,6 +93,7 @@ export default function TrendingPage() {
                   fire: i === 0,
                   rawPrice: p.current_price,
                   rawOriginal: p.original_price,
+                  category: p.category ?? "Other",
                 };
               }
             )
@@ -113,7 +116,7 @@ export default function TrendingPage() {
       const res = await fetch("/api/scraper", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ productName: query, scrapeAll: true }),
+        body: JSON.stringify({ query, platforms: ["amazon", "flipkart", "croma", "myntra", "ajio", "snapdeal", "tatacliq", "nykaa", "vijaysales"] }),
       });
       const data = await res.json();
       if (data.error) {
@@ -234,7 +237,7 @@ export default function TrendingPage() {
         </div>
 
         <div className="flex gap-3">
-          {categories.map((cat) => (
+          {(["All", ...Array.from(new Set(products.map(p => p.category).filter((c): c is string => !!c)))] as string[]).map((cat) => (
             <button
               key={cat}
               onClick={() => setActiveCategory(cat)}
@@ -250,7 +253,7 @@ export default function TrendingPage() {
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-          {products.map((p) => (
+          {products.filter(p => activeCategory === "All" || (p.category ?? "").toLowerCase().includes(activeCategory.toLowerCase())).map((p) => (
             <div
               key={p.rank}
               onClick={() => handleCompare(p)}

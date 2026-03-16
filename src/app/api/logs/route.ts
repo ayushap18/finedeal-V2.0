@@ -8,7 +8,8 @@ export async function GET(req: NextRequest) {
     let logs = getAll("system_logs");
 
     if (level && level !== "all") {
-      logs = logs.filter((l) => l.level === level);
+      const normalizedLevel = level.toLowerCase();
+      logs = logs.filter((l) => (l.level as string).toLowerCase() === normalizedLevel);
     }
 
     // Sort newest first

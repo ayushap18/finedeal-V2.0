@@ -26,7 +26,11 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
       .then(d => {
         if (d.product) setProduct(d.product);
         if (d.price_history) {
-          setHistory(d.price_history.sort((a: PriceHistory, b: PriceHistory) => a.date.localeCompare(b.date)).slice(-30));
+          setHistory(d.price_history.map((ph: { recorded_at?: string; date?: string; price: number; platform?: string }) => ({
+            date: ph.recorded_at || ph.date || "",
+            price: ph.price,
+            platform: ph.platform || "",
+          })).sort((a: PriceHistory, b: PriceHistory) => a.date.localeCompare(b.date)).slice(-30));
         }
       })
       .catch(() => {})

@@ -4,8 +4,8 @@ import { useState, useEffect } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 
 interface SettingsData {
-  groq_api_key: string;
-  gemini_api_key: string;
+  groq_key: string;
+  gemini_key: string;
   smtp_host: string;
   smtp_port: number;
   smtp_user: string;
@@ -92,13 +92,13 @@ function buildApiCards(settings: SettingsData | null): ApiCard[] {
   return [
     {
       ...defaultApiCards[0],
-      status: settings.groq_api_key && !settings.groq_api_key.startsWith("--") ? "connected" as const : defaultApiCards[0].status,
-      fields: [{ label: "API Key", value: settings.groq_api_key ?? "" }],
+      status: settings.groq_key && !settings.groq_key.startsWith("--") ? "connected" as const : defaultApiCards[0].status,
+      fields: [{ label: "API Key", value: settings.groq_key ?? "" }],
     },
     {
       ...defaultApiCards[1],
-      status: settings.gemini_api_key && !settings.gemini_api_key.startsWith("--") ? "connected" as const : defaultApiCards[1].status,
-      fields: [{ label: "API Key", value: settings.gemini_api_key ?? "" }],
+      status: settings.gemini_key && !settings.gemini_key.startsWith("--") ? "connected" as const : defaultApiCards[1].status,
+      fields: [{ label: "API Key", value: settings.gemini_key ?? "" }],
     },
     {
       ...defaultApiCards[2],
@@ -141,10 +141,24 @@ export default function ApiSettingsPage() {
 
   const handleSave = () => {
     setSaveStatus("saving");
+    // Map form field names to backend settings keys
+    const mappedValues: Record<string, string> = {};
+    const keyMap: Record<string, string> = {
+      "Groq API_API Key": "groq_key",
+      "Google Gemini_API Key": "gemini_key",
+      "Telegram Bot_Bot Token": "telegram_bot_token",
+      "Telegram Bot_Chat ID": "telegram_chat_id",
+    };
+    for (const [formKey, value] of Object.entries(formValues)) {
+      // Skip masked values that haven't been changed
+      if (value.includes("••••")) continue;
+      const backendKey = keyMap[formKey] ?? formKey;
+      mappedValues[backendKey] = value;
+    }
     fetch("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(formValues),
+      body: JSON.stringify(mappedValues),
     })
       .then((res) => res.json())
       .then((data) => {

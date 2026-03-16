@@ -29,8 +29,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    if (!body.name || !body.platform || !body.url) {
-      return corsError("name, platform, and url are required");
+    if (!body.name || !body.platform) {
+      return corsError("name and platform are required");
     }
     const product = create("products", {
       ...body,

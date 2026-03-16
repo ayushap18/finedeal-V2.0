@@ -26,8 +26,8 @@ export default function PriceHistoryPage() {
       .then((res) => res?.json())
       .then((data) => {
         if (data?.price_history?.length > 0) {
-          setHistory(data.price_history.slice(-10).map((h: { date: string; price: number }) => ({
-            date: h.date,
+          setHistory(data.price_history.slice(-10).map((h: { recorded_at?: string; date?: string; price: number }) => ({
+            date: h.recorded_at || h.date || "",
             price: h.price,
           })));
         }

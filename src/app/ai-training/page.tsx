@@ -106,7 +106,7 @@ export default function AITrainingPage() {
       const classifyData = await classifyRes.json();
 
       if (classifyData.result) {
-        addLog(`Classification: ${classifyData.result.category} (${(classifyData.result.confidence * 100).toFixed(1)}% confidence)`, "text-success");
+        addLog(`Classification: ${classifyData.result.category} (${((classifyData.result.confidence ?? 0) * 100).toFixed(1)}% confidence)`, "text-success");
         addLog(`Tags: ${classifyData.result.tags?.join(", ") ?? "none"}`, "text-text-muted");
       } else {
         addLog(`Classification failed: ${classifyData.error ?? "unknown error"}`, "text-red");
@@ -177,7 +177,7 @@ export default function AITrainingPage() {
       const classData = await classRes.json();
 
       if (classData.result) {
-        addLog(`Gemini Classification: ${classData.result.category} (${(classData.result.confidence * 100).toFixed(1)}%)`, "text-success");
+        addLog(`Gemini Classification: ${classData.result.category} (${((classData.result.confidence ?? 0) * 100).toFixed(1)}%)`, "text-success");
       } else {
         addLog(`Gemini classification failed: ${classData.error ?? "unknown"}`, "text-red");
       }
@@ -226,7 +226,7 @@ export default function AITrainingPage() {
           </div>
         </div>
 
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-bg-card border border-border rounded-lg p-5">
             <p className="text-text-secondary text-sm">Model Accuracy</p>
             <p className="text-[28px] font-bold text-success mt-1">{statCards.accuracy}</p>

@@ -208,7 +208,7 @@ Respond with ONLY a JSON object (no markdown):
             if (r.price < (Number(existing.lowest_price) || Infinity)) updates.lowest_price = r.price;
             if (r.price > (Number(existing.highest_price) || 0)) updates.highest_price = r.price;
             update("products", String(existing.id), updates);
-            create("price_history", { product_id: existing.id, price: r.price, platform: r.platform, date: r.scrapedAt });
+            create("price_history", { product_id: existing.id, price: r.price, currency: "INR", recorded_at: r.scrapedAt });
           }
         }
       }

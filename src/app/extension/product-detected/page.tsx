@@ -228,7 +228,7 @@ function ProductDetectedInner() {
           </div>
 
           <Link
-            href="/extension/searching"
+            href={`/extension/searching?q=${encodeURIComponent(product.name)}`}
             className="w-full rounded-lg bg-accent px-4 py-3 text-sm font-semibold text-text-on-accent flex items-center justify-center gap-2"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>

@@ -22,8 +22,9 @@ export default function SearchingPage() {
   useEffect(() => {
     let cancelled = false;
     async function runSearch() {
-      const query = "Samsung Galaxy S24 Ultra";
-      const platforms = ["amazon", "flipkart", "croma", "myntra"];
+      const params = new URLSearchParams(window.location.search);
+      const query = params.get("q") || "Samsung Galaxy S24 Ultra";
+      const platforms = ["amazon", "flipkart", "croma", "myntra", "ajio", "snapdeal", "tatacliq", "nykaa", "vijaysales"];
 
       for (let i = 0; i < ALL_SITES.length; i++) {
         if (cancelled) return;
@@ -67,10 +68,7 @@ export default function SearchingPage() {
       } catch {
         if (!cancelled) {
           setSites((prev) =>
-            prev.map((s, i) => {
-              if (i < 4) return { ...s, state: `${Math.floor(Math.random() * 5) + 1} found`, tone: "success" as const };
-              return { ...s, state: "No results", tone: "muted" as const };
-            })
+            prev.map((s) => ({ ...s, state: "Search failed", tone: "error" as const }))
           );
         }
       }

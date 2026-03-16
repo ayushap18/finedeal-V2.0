@@ -31,11 +31,13 @@ export default function PriceAnalyticsPage() {
         if (data.stats) {
           const drops = data.stats.price_drops_today ?? 0;
           const products = data.stats.total_products ?? 0;
+          const alerts = data.stats.active_alerts ?? 0;
+          const avgDrop = products > 0 ? ((drops / products) * 100).toFixed(1) : "0.0";
           setStats([
-            { label: "Avg. Price Drop", value: `-${((drops / Math.max(products, 1)) * 100).toFixed(1)}%`, sub: `${drops} drops detected`, subColor: "text-success", icon: "drop" },
-            { label: "Best Deal Found", value: `-${Math.min(47, drops + 10)}%`, sub: "Across 8 platforms", subColor: "text-text-secondary", icon: "star" },
-            { label: "Price Data Points", value: (products * 30).toLocaleString(), sub: "Last 30 days", subColor: "text-text-secondary", icon: "data" },
-            { label: "Active Comparisons", value: products.toLocaleString(), sub: "Real-time tracking", subColor: "text-info", icon: "compare" },
+            { label: "Avg. Price Drop", value: `-${avgDrop}%`, sub: `${drops} drops detected`, subColor: "text-success", icon: "drop" },
+            { label: "Products Tracked", value: products.toLocaleString(), sub: "Across 9 platforms", subColor: "text-text-secondary", icon: "star" },
+            { label: "Active Alerts", value: alerts.toLocaleString(), sub: "Monitoring prices", subColor: "text-text-secondary", icon: "data" },
+            { label: "Price Drops Today", value: drops.toLocaleString(), sub: "Real-time tracking", subColor: "text-info", icon: "compare" },
           ]);
         }
         if (data.weekly_data?.length) {
@@ -44,9 +46,10 @@ export default function PriceAnalyticsPage() {
             value: d.scrapes ?? 0,
           })));
         }
-        if (data.categories?.length) {
-          const total = data.categories.reduce((sum: number, c: { count: number }) => sum + (c.count ?? 0), 0);
-          setCategories(data.categories.map((c: { name: string; count: number }, i: number) => ({
+        const catData = data.category_breakdown ?? data.categories;
+        if (catData?.length) {
+          const total = catData.reduce((sum: number, c: { count: number }) => sum + (c.count ?? 0), 0);
+          setCategories(catData.map((c: { name: string; count: number }, i: number) => ({
             name: c.name,
             pct: total > 0 ? Math.round((c.count / total) * 100) : 0,
             color: categoryColors[i % categoryColors.length],

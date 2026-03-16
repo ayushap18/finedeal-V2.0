@@ -34,8 +34,8 @@ export async function GET() {
             create("price_history", {
               product_id: product.id,
               price: bestResult.price,
-              platform: bestResult.platform,
-              date: new Date().toISOString(),
+              currency: "INR",
+              recorded_at: new Date().toISOString(),
             });
             updated++;
           }

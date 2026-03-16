@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import ExtensionHeader from "@/components/ExtensionHeader";
 
@@ -8,12 +8,29 @@ const quickTargets = [115000, 120000, 110000];
 
 export default function AlertSetupPage() {
   const router = useRouter();
+  const [productId, setProductId] = useState("");
+  const [productName, setProductName] = useState("Samsung Galaxy S24 Ultra 256GB");
+  const [productPrice, setProductPrice] = useState("₹1,25,999 (Croma)");
   const [targetPrice, setTargetPrice] = useState(120000);
   const [emailOn, setEmailOn] = useState(true);
   const [telegramOn, setTelegramOn] = useState(false);
   const [userEmail, setUserEmail] = useState("");
   const [telegramChatId, setTelegramChatId] = useState("");
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/products")
+      .then(r => r.json())
+      .then(d => {
+        if (d.products?.length > 0) {
+          const p = d.products[0];
+          setProductId(p.id);
+          setProductName(p.name);
+          setProductPrice(`₹${(p.current_price ?? 0).toLocaleString("en-IN")} (${p.platform})`);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const handleSave = async () => {
     if (emailOn && !userEmail) {
@@ -45,7 +62,7 @@ export default function AlertSetupPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          product_id: "first",
+          product_id: productId || "p001",
           alert_type: "target_price",
           target_value: targetPrice,
           notify_email: emailOn,
@@ -96,8 +113,8 @@ export default function AlertSetupPage() {
 
         <div className="space-y-4 p-5">
           <div className="rounded-lg border border-border bg-bg-card p-3">
-            <p className="text-sm font-medium text-text-primary">Samsung Galaxy S24 Ultra 256GB</p>
-            <p className="mt-1 text-xs text-text-secondary">Current best: ₹1,25,999 (Croma)</p>
+            <p className="text-sm font-medium text-text-primary">{productName}</p>
+            <p className="mt-1 text-xs text-text-secondary">Current best: {productPrice}</p>
           </div>
 
           <div>
