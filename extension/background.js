@@ -58,7 +58,7 @@ async function handleProductDetected(product) {
           email: stored.userEmail || undefined,
           telegram_chat_id: stored.telegramChatId || undefined,
           browser: 'Chrome',
-          extension_version: '4.0.0',
+          extension_version: '4.3.0',
         })
       });
     }

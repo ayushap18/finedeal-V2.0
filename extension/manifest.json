@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FineDeal - Smart Price Comparison",
-  "version": "4.0.0",
+  "version": "4.3.0",
   "description": "AI-powered price comparison and deal tracking across Indian e-commerce sites.",
   "permissions": ["activeTab", "storage", "notifications"],
   "host_permissions": [
