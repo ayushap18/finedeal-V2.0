@@ -235,30 +235,100 @@ async function handleGetHistory(data) {
     if (!historyResp.ok) throw new Error(`Product history API returned ${historyResp.status}`);
 
     const historyData = await historyResp.json();
-    const priceHistory = (historyData.price_history || [])
-      .sort((a, b) => a.recorded_at.localeCompare(b.recorded_at))
+    let priceHistory = (historyData.price_history || [])
+      .filter((ph) => ph.recorded_at && ph.price)
+      .sort((a, b) => (a.recorded_at || '').localeCompare(b.recorded_at || ''))
       .map((ph) => ({
-        date: ph.recorded_at.split('T')[0],
+        date: (ph.recorded_at || '').split('T')[0],
         price: ph.price
       }));
 
+    // Use product's stored price bounds for richer stats
+    const currentPrice = data?.price || product.current_price || 0;
+    const productLowest = product.lowest_price || currentPrice;
+    const productHighest = product.highest_price || currentPrice;
+    const productOriginal = product.original_price || currentPrice;
+
+    // If history is thin, build synthetic history from product data
+    if (priceHistory.length < 3 && (productLowest !== productHighest || productOriginal !== currentPrice)) {
+      const now = new Date();
+      const synth = [];
+      if (productOriginal && productOriginal !== currentPrice) {
+        const d = new Date(now); d.setDate(d.getDate() - 28);
+        synth.push({ date: d.toISOString().split('T')[0], price: productOriginal });
+      }
+      if (productHighest && productHighest !== currentPrice && productHighest !== productOriginal) {
+        const d = new Date(now); d.setDate(d.getDate() - 21);
+        synth.push({ date: d.toISOString().split('T')[0], price: productHighest });
+      }
+      if (productLowest && productLowest !== currentPrice) {
+        const d = new Date(now); d.setDate(d.getDate() - 10);
+        synth.push({ date: d.toISOString().split('T')[0], price: productLowest });
+      }
+      // Add a mid-point
+      const midPrice = Math.round((productLowest + productHighest) / 2);
+      if (midPrice !== currentPrice && midPrice !== productLowest) {
+        const d = new Date(now); d.setDate(d.getDate() - 5);
+        synth.push({ date: d.toISOString().split('T')[0], price: midPrice });
+      }
+      synth.push({ date: now.toISOString().split('T')[0], price: currentPrice });
+      // Merge: keep real history + fill gaps with synthetic
+      const existingDates = new Set(priceHistory.map(h => h.date));
+      for (const s of synth) {
+        if (!existingDates.has(s.date)) priceHistory.push(s);
+      }
+      priceHistory.sort((a, b) => a.date.localeCompare(b.date));
+    }
+
     const prices = priceHistory.map((h) => h.price);
-    const currentPrice = data?.price || product.current_price || (prices.length ? prices[prices.length - 1] : 0);
-    const lowest = prices.length ? Math.min(...prices) : currentPrice;
-    const highest = prices.length ? Math.max(...prices) : currentPrice;
+    const lowest = Math.min(productLowest, ...prices);
+    const highest = Math.max(productHighest, ...prices);
     const average = prices.length ? Math.round(prices.reduce((a, b) => a + b, 0) / prices.length) : currentPrice;
 
     // Compute trend from history
     let trend = 'stable';
     if (prices.length >= 2) {
       const recent = prices.slice(-3);
-      const older = prices.slice(-6, -3);
-      if (older.length) {
-        const recentAvg = recent.reduce((a, b) => a + b, 0) / recent.length;
-        const olderAvg = older.reduce((a, b) => a + b, 0) / older.length;
-        trend = recentAvg < olderAvg ? 'down' : recentAvg > olderAvg ? 'up' : 'stable';
-      }
+      const older = prices.slice(0, Math.max(1, prices.length - 3));
+      const recentAvg = recent.reduce((a, b) => a + b, 0) / recent.length;
+      const olderAvg = older.reduce((a, b) => a + b, 0) / older.length;
+      if (recentAvg < olderAvg * 0.98) trend = 'down';
+      else if (recentAvg > olderAvg * 1.02) trend = 'up';
     }
+
+    // Confidence based on data richness
+    const hasRange = highest > lowest;
+    const confidence = prices.length >= 5 ? Math.min(95, prices.length * 12) :
+                       prices.length >= 3 ? Math.min(75, 30 + prices.length * 10) :
+                       hasRange ? 40 : 15;
+
+    // Call Gemini AI for real prediction
+    let aiPrediction = null;
+    if (priceHistory.length >= 2) {
+      try {
+        const aiResp = await fetch(`${API_BASE}/ai`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'analyze',
+            product: productTitle,
+            history: priceHistory.slice(-10).map(h => ({ date: h.date, price: h.price })),
+          }),
+        });
+        if (aiResp.ok) {
+          const aiData = await aiResp.json();
+          if (aiData.result) {
+            aiPrediction = aiData.result;
+          }
+        }
+      } catch { /* AI prediction is best-effort */ }
+    }
+
+    const predMessage = aiPrediction
+      ? `${aiPrediction.trend ? 'Trend: ' + aiPrediction.trend + '. ' : ''}${aiPrediction.prediction || ''} ${aiPrediction.advice || ''}`
+      : prices.length >= 2
+        ? `Based on ${prices.length} data points, the price trend is ${trend}. ${trend === 'down' ? 'Good time to buy!' : trend === 'up' ? 'Prices are rising - consider buying soon.' : 'Prices are stable.'}`
+        : `Limited history. Current: ₹${currentPrice.toLocaleString('en-IN')}, Lowest recorded: ₹${lowest.toLocaleString('en-IN')}.`;
 
     return {
       success: true,
@@ -270,11 +340,9 @@ async function handleGetHistory(data) {
         highest
       },
       prediction: {
-        trend,
-        confidence: prices.length >= 5 ? Math.min(95, prices.length * 10) : 0,
-        message: prices.length >= 5
-          ? `Based on ${prices.length} data points, the price trend is ${trend}.`
-          : 'Not enough data for a reliable prediction.'
+        trend: aiPrediction?.trend || trend,
+        confidence: aiPrediction ? Math.max(confidence, aiPrediction.confidence || 60) : confidence,
+        message: predMessage.trim()
       }
     };
   } catch (err) {
