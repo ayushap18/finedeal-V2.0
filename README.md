@@ -179,6 +179,4 @@ The @finedeal_bot provides instant price comparison via Telegram messages, suppo
 
 MIT
 
-## Author
 
-**Ayush Sharma** - [@ayushap18](https://github.com/ayushap18)
