@@ -176,15 +176,25 @@
     const bar = document.getElementById('search-progress');
     const text = document.getElementById('progress-text');
 
-    bar.style.width = '10%';
-    text.textContent = 'Searching across 9 platforms...';
+    bar.style.width = '5%';
+    text.textContent = 'Phase 1: Scraping 9 platforms...';
 
-    // Animate progress while waiting
-    let progress = 10;
+    // Animate progress with pipeline phases
+    let progress = 5;
+    const phases = [
+      { at: 50, text: 'Phase 2: Groq AI validating results...' },
+      { at: 70, text: 'Phase 3: Gemini analyzing deals...' },
+      { at: 90, text: 'Phase 4: Sending to Telegram...' },
+    ];
     const progressInterval = setInterval(() => {
-      progress = Math.min(progress + 3, 85);
+      progress = Math.min(progress + 2, 85);
       bar.style.width = progress + '%';
-    }, 500);
+      for (const phase of phases) {
+        if (progress >= phase.at && progress < phase.at + 3) {
+          text.textContent = phase.text;
+        }
+      }
+    }, 400);
 
     // Fetch results from background (which calls /api/scraper)
     let resp;
@@ -258,17 +268,25 @@
   // ===== Screen 3: Results =====
   function renderResults() {
     if (!comparisonResults) return;
-    const { results, stats } = comparisonResults;
+    const { results, stats, ai } = comparisonResults;
 
-    // Deal score
-    const score = stats.dealScore || 0;
+    // Deal score - use Gemini AI score if available
+    const score = ai?.dealScore || stats.dealScore || 0;
     document.getElementById('deal-score-value').textContent = score;
 
-    let scoreDesc = 'This is a fair deal.';
-    if (score >= 80) scoreDesc = 'Excellent deal! This is significantly below average price.';
-    else if (score >= 60) scoreDesc = 'Good deal. Price is below the average across sites.';
-    else if (score >= 40) scoreDesc = 'Average pricing. Consider waiting for a better deal.';
-    else scoreDesc = 'Not a great deal right now. Prices have been lower.';
+    // Show Gemini AI recommendation if available
+    let scoreDesc = '';
+    if (ai?.recommendation) {
+      scoreDesc = ai.recommendation;
+    } else if (score >= 80) {
+      scoreDesc = 'Excellent deal! This is significantly below average price.';
+    } else if (score >= 60) {
+      scoreDesc = 'Good deal. Price is below the average across sites.';
+    } else if (score >= 40) {
+      scoreDesc = 'Average pricing. Consider waiting for a better deal.';
+    } else {
+      scoreDesc = 'Not a great deal right now. Prices have been lower.';
+    }
     document.getElementById('deal-score-desc').textContent = scoreDesc;
 
     // Update deal score ring color
@@ -288,6 +306,48 @@
       return;
     }
 
+    // === AI Insight banner (Gemini) ===
+    if (ai?.insight || ai?.summary) {
+      const aiBanner = document.createElement('div');
+      aiBanner.style.cssText = 'background:#1a1520;border:1px solid #A855F740;border-radius:10px;padding:10px 12px;margin-bottom:8px;';
+      const confColor = (ai.confidence || 0) >= 70 ? '#4ADE80' : (ai.confidence || 0) >= 40 ? '#F97316' : '#F87171';
+      aiBanner.innerHTML = `
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#A855F7" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M12 6v6l4 2"/></svg>
+          <span style="color:#A855F7;font-size:11px;font-weight:600;">Gemini AI Analysis</span>
+          <span style="margin-left:auto;color:${confColor};font-size:10px;font-weight:600;">${ai.confidence || 0}% confidence</span>
+        </div>
+        <p style="color:#d4d4d8;font-size:11px;line-height:1.5;margin:0;">${ai.insight || ai.summary}</p>
+        ${ai.shouldBuy !== undefined ? `<div style="margin-top:6px;display:flex;align-items:center;gap:4px;">
+          <span style="background:${ai.shouldBuy ? '#4ADE8020' : '#F8717120'};color:${ai.shouldBuy ? '#4ADE80' : '#F87171'};font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px;">${ai.shouldBuy ? 'BUY NOW' : 'WAIT'}</span>
+        </div>` : ''}`;
+      list.appendChild(aiBanner);
+    }
+
+    // === Price Comparison Bar Chart (SVG) ===
+    if (validResults.length >= 2) {
+      const chartDiv = document.createElement('div');
+      chartDiv.style.cssText = 'background:#141414;border:1px solid #1F1F1F;border-radius:10px;padding:10px 12px;margin-bottom:8px;';
+      const maxPrice = Math.max(...validResults.map(r => r.price));
+      const barH = 18;
+      const gap = 4;
+      const svgH = validResults.length * (barH + gap) + 4;
+      let bars = '';
+      validResults.forEach((r, i) => {
+        const w = Math.max(20, (r.price / maxPrice) * 280);
+        const y = i * (barH + gap) + 2;
+        const color = i === 0 ? '#4ADE80' : '#F97316';
+        bars += `<rect x="70" y="${y}" width="${w}" height="${barH}" rx="4" fill="${color}" opacity="${i === 0 ? 1 : 0.6}"/>`;
+        bars += `<text x="0" y="${y + 13}" fill="#999" font-size="10" font-family="Manrope,sans-serif">${(r.site || '').substring(0, 10)}</text>`;
+        bars += `<text x="${72 + w}" y="${y + 13}" fill="#e5e5e5" font-size="10" font-weight="600" font-family="Manrope,sans-serif">${fmt(r.price)}</text>`;
+      });
+      chartDiv.innerHTML = `
+        <p style="color:#888;font-size:10px;font-weight:600;margin:0 0 6px;text-transform:uppercase;letter-spacing:0.5px;">Price Comparison</p>
+        <svg viewBox="0 0 400 ${svgH}" style="width:100%;height:${svgH}px;">${bars}</svg>`;
+      list.appendChild(chartDiv);
+    }
+
+    // === Result Cards ===
     validResults.forEach((r, i) => {
       const isBest = i === 0;
       const item = document.createElement('div');
@@ -357,7 +417,7 @@
       document.getElementById('hist-average').textContent = fmt(stats.average);
     }
 
-    // Prediction
+    // Prediction from background
     if (prediction) {
       document.getElementById('pred-confidence').textContent = prediction.confidence + '% confidence';
       document.getElementById('pred-text').textContent = prediction.message;
@@ -365,6 +425,29 @@
 
     // Draw chart
     drawPriceChart(history || []);
+
+    // Also fetch real AI analysis from Gemini for deeper prediction
+    if (history && history.length >= 2 && currentProduct?.title) {
+      const predEl = document.getElementById('pred-text');
+      predEl.textContent = (prediction?.message || '') + ' Asking Gemini AI...';
+      fetch('http://localhost:3000/api/ai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'analyze',
+          product: currentProduct.title,
+          history: history.slice(-10).map(h => ({ date: h.date.split('T')[0], price: h.price })),
+        }),
+      })
+        .then(r => r.json())
+        .then(d => {
+          if (d.result) {
+            const r = d.result;
+            predEl.textContent = `Trend: ${r.trend || 'stable'} | ${r.prediction || ''} | ${r.advice || ''}`;
+          }
+        })
+        .catch(() => { /* keep the background prediction */ });
+    }
   }
 
   function drawPriceChart(history) {

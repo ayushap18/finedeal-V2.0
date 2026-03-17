@@ -157,14 +157,31 @@ async function handleComparePrices(data) {
       // lowestEver stays as lowestPrice
     }
 
+    // Extract Gemini analysis from the scraper API response
+    const geminiAnalysis = apiData.gemini_analysis || null;
+    const geminiScore = geminiAnalysis?.dealScore ?? dealScore;
+    const geminiRec = geminiAnalysis?.priceAnalysis?.recommendation ?? '';
+    const geminiInsight = geminiAnalysis?.priceAnalysis?.priceInsight ?? '';
+    const geminiConfidence = geminiAnalysis?.priceAnalysis?.confidence ?? 0;
+    const geminiShouldBuy = geminiAnalysis?.priceAnalysis?.shouldBuy ?? false;
+    const geminiSummary = geminiAnalysis?.dealSummary?.summary ?? '';
+
     const comparisonData = {
       results,
       stats: {
         lowestPrice,
         averagePrice: Math.round(avgPrice),
         sitesFound: results.length,
-        dealScore,
+        dealScore: geminiScore || dealScore,
         lowestEver: Math.round(lowestEver)
+      },
+      ai: {
+        recommendation: geminiRec,
+        insight: geminiInsight,
+        confidence: geminiConfidence,
+        shouldBuy: geminiShouldBuy,
+        summary: geminiSummary,
+        dealScore: geminiScore,
       },
       timestamp: Date.now()
     };
