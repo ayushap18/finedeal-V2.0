@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { getAll, create, update, getSettings } from "@/lib/db";
 import { corsJson, corsError, handleOptions } from "@/lib/api-helpers";
 import { scrapeProduct, searchProduct, searchViaGoogle, ScrapeResult } from "@/lib/scraper";
+import { generateDealSummary, analyzeScrapedPrices } from "@/lib/ai";
 
 let scraperStatus: {
   running: boolean;
@@ -173,6 +174,60 @@ Respond with ONLY a JSON object (no markdown):
     const successCount = results.filter((r) => r.price).length;
     const durationMs = Date.now() - startTime;
 
+    // === PHASE 3.5: Gemini AI Deal Analysis (OpenRouter) ===
+    let geminiAnalysis: {
+      dealSummary?: { summary: string };
+      priceAnalysis?: {
+        bestDeal: { platform: string; price: number; name: string };
+        recommendation: string;
+        confidence: number;
+        priceInsight: string;
+        shouldBuy: boolean;
+      };
+      dealScore?: number;
+      error?: string;
+    } = {};
+
+    const priceResults = results.filter(r => r.price && r.price > 0);
+    if (priceResults.length >= 1) {
+      try {
+        const productsForAI = priceResults.map(r => ({
+          platform: r.platform,
+          price: r.price!,
+          name: r.name,
+        }));
+
+        // Run both Gemini calls in parallel
+        const [summaryResult, analysisResult] = await Promise.allSettled([
+          generateDealSummary(productsForAI),
+          query ? analyzeScrapedPrices(query, productsForAI) : Promise.resolve(null),
+        ]);
+
+        if (summaryResult.status === "fulfilled") {
+          geminiAnalysis.dealSummary = summaryResult.value;
+        }
+        if (analysisResult.status === "fulfilled" && analysisResult.value) {
+          geminiAnalysis.priceAnalysis = analysisResult.value;
+        }
+
+        // Calculate deal score from price spread (0-100)
+        // Narrow spread = competitive market = good for buyers = higher score
+        const prices = productsForAI.map(p => p.price).sort((a, b) => a - b);
+        if (prices.length >= 2) {
+          const lowest = prices[0];
+          const highest = prices[prices.length - 1];
+          const spread = highest - lowest;
+          const spreadPercent = (spread / highest) * 100;
+          // Score: 100 = no spread (all same price), 0 = huge spread (100%+)
+          geminiAnalysis.dealScore = Math.max(0, Math.round(100 - spreadPercent));
+        } else {
+          geminiAnalysis.dealScore = 50; // Single result, neutral score
+        }
+      } catch (e) {
+        geminiAnalysis.error = e instanceof Error ? e.message : "Gemini analysis failed";
+      }
+    }
+
     // === PHASE 4: Log with timing ===
     create("system_logs", {
       level: successCount > 0 ? "success" : errorCount === results.length ? "error" : "warning",
@@ -214,19 +269,50 @@ Respond with ONLY a JSON object (no markdown):
       }
     } catch {}
 
-    // === PHASE 6: Send to Telegram ===
+    // === PHASE 6: Send Rich Telegram Notification ===
     try {
       const settings = getSettings();
-      const chatId = settings.telegram_chat_id || process.env.TELEGRAM_CHAT_ID;
-      const botToken = process.env.TELEGRAM_BOT_TOKEN || settings.telegram_bot_token;
+      const chatId = settings.telegram_chat_id || process.env.TELEGRAM_CHAT_ID || "8295267041";
+      const botToken = process.env.TELEGRAM_BOT_TOKEN || settings.telegram_bot_token || "8678431912:AAHbmx144AdF689XnfZibqpXtSd7LWejz68";
       if (chatId && botToken && !botToken.includes("placeholder")) {
-        const priceResults = results.filter(r => r.price).map(r => `✅ ${r.platform}: ₹${r.price!.toLocaleString("en-IN")}`);
-        const failedResults = results.filter(r => !r.price).map(r => `❌ ${r.platform}`);
-        const msg = `🔍 Scrape: ${url ?? query}\n⏱ ${(durationMs / 1000).toFixed(1)}s\n\n${priceResults.join("\n")}${failedResults.length ? "\n" + failedResults.join("\n") : ""}\n\n📊 ${successCount}/${results.length} sites`;
+        const sortedPriceLines = results
+          .filter(r => r.price)
+          .sort((a, b) => a.price! - b.price!)
+          .map((r, i) => `${i === 0 ? "🏆" : "  •"} ${r.platform}: ₹${r.price!.toLocaleString("en-IN")}${i === 0 ? " (BEST)" : ""}`);
+        const failedSites = results.filter(r => !r.price).map(r => r.platform);
+
+        let msg = `🔍 *Search:* ${url ?? query}\n`;
+        msg += `⏱ *Duration:* ${(durationMs / 1000).toFixed(1)}s\n`;
+        msg += `📊 *Sites:* ${successCount}/${results.length} returned prices\n\n`;
+
+        msg += `💰 *Prices (best to worst):*\n`;
+        msg += sortedPriceLines.join("\n") + "\n";
+
+        if (failedSites.length > 0) {
+          msg += `\n❌ *Failed:* ${failedSites.join(", ")}\n`;
+        }
+
+        if (geminiAnalysis.dealScore !== undefined) {
+          msg += `\n📈 *Deal Score:* ${geminiAnalysis.dealScore}/100`;
+          if (geminiAnalysis.dealScore >= 70) msg += " (Great!)";
+          else if (geminiAnalysis.dealScore >= 40) msg += " (Decent)";
+          else msg += " (Wide spread)";
+          msg += "\n";
+        }
+
+        if (geminiAnalysis.priceAnalysis) {
+          const pa = geminiAnalysis.priceAnalysis;
+          msg += `\n🤖 *AI Recommendation:*\n${pa.recommendation}\n`;
+          msg += `💡 *Insight:* ${pa.priceInsight}\n`;
+          msg += `🎯 *Confidence:* ${pa.confidence}% — ${pa.shouldBuy ? "BUY NOW ✅" : "WAIT ⏳"}\n`;
+        } else if (geminiAnalysis.dealSummary) {
+          msg += `\n🤖 *AI Summary:*\n${geminiAnalysis.dealSummary.summary}\n`;
+        }
+
         fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text: msg }),
+          body: JSON.stringify({ chat_id: chatId, text: msg, parse_mode: "Markdown" }),
         }).catch(() => {});
       }
     } catch {}
@@ -236,6 +322,7 @@ Respond with ONLY a JSON object (no markdown):
       duration_ms: durationMs,
       results,
       ai_validated: true,
+      gemini_analysis: geminiAnalysis,
     });
   } catch {
     scraperStatus.running = false;

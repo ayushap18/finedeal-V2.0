@@ -171,6 +171,39 @@ Respond with ONLY a JSON object (no markdown):
   return parseJsonResponse(raw);
 }
 
+// --------------- Scraped Price Analysis (OpenRouter/Gemini) ---------------
+
+export async function analyzeScrapedPrices(
+  query: string,
+  results: { platform: string; price: number; name: string }[]
+): Promise<{
+  bestDeal: { platform: string; price: number; name: string };
+  recommendation: string;
+  confidence: number;
+  priceInsight: string;
+  shouldBuy: boolean;
+}> {
+  const listing = results
+    .map((r, i) => `${i + 1}. ${r.platform}: "${r.name}" at ₹${r.price.toLocaleString("en-IN")}`)
+    .join("\n");
+
+  const prompt = `You are a shopping deal analyst. I searched for "${query}" and found these prices across platforms:
+
+${listing}
+
+Analyze these results and respond with ONLY a JSON object (no markdown, no extra text):
+{
+  "bestDeal": {"platform":"<platform name>","price":<number>,"name":"<product name>"},
+  "recommendation": "<1-2 sentence recommendation on which to buy and why>",
+  "confidence": <0-100 score of how confident you are in this recommendation>,
+  "priceInsight": "<1-2 sentence insight about the pricing pattern, whether prices might drop, market context>",
+  "shouldBuy": <true if now is a good time to buy, false if they should wait>
+}`;
+
+  const raw = await openRouterChat([{ role: "user", content: prompt }], 0.2);
+  return parseJsonResponse(raw);
+}
+
 // --------------- Health check ---------------
 
 export async function checkApiConnectivity() {
