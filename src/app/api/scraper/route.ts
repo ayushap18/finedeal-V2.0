@@ -174,7 +174,7 @@ Respond with ONLY a JSON object (no markdown):
     const successCount = results.filter((r) => r.price).length;
     const durationMs = Date.now() - startTime;
 
-    // === PHASE 3.5: Gemini AI Deal Analysis (OpenRouter) ===
+    // === PHASE 3.5: Gemini AI Deal Analysis ===
     let geminiAnalysis: {
       dealSummary?: { summary: string };
       priceAnalysis?: {

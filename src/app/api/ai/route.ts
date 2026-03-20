@@ -22,8 +22,8 @@ export async function GET() {
         last_trained: null,
       },
       {
-        id: "gemini-2.0-flash",
-        name: "Gemini 2.0 Flash",
+        id: "gemini-3-flash-preview",
+        name: "Gemini 3 Flash Preview",
         provider: "Google",
         status: connectivity.gemini.status === "connected" ? "active" : "error",
         accuracy: 94.2,

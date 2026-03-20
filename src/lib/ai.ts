@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent";
 
 // Load .env.local keys
 let _envLocalCache: Record<string, string> | null = null;
@@ -29,9 +29,9 @@ function getGroqKey() {
   const envLocal = loadEnvLocal();
   return envLocal.GROQ_API_KEY || process.env.GROQ_API_KEY || "";
 }
-function getOpenRouterKey() {
+function getGeminiKey() {
   const envLocal = loadEnvLocal();
-  return envLocal.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY || "";
+  return envLocal.GEMINI_API_KEY || process.env.GEMINI_API_KEY || "";
 }
 
 // --------------- Groq (fast, primary) ---------------
@@ -63,35 +63,39 @@ async function groqChat(messages: { role: string; content: string }[], temperatu
   return data.choices?.[0]?.message?.content ?? "";
 }
 
-// --------------- OpenRouter (replaces Gemini) ---------------
+// --------------- Gemini (direct API) ---------------
 
-async function openRouterChat(messages: { role: string; content: string }[], temperature = 0.3) {
-  const key = getOpenRouterKey();
-  if (!key) throw new Error("OPENROUTER_API_KEY is not configured");
+async function geminiChat(messages: { role: string; content: string }[], temperature = 0.3) {
+  const key = getGeminiKey();
+  if (!key) throw new Error("GEMINI_API_KEY is not configured");
 
-  const res = await fetch(OPENROUTER_URL, {
+  // Convert chat messages to Gemini format
+  const contents = messages.map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }],
+  }));
+
+  const res = await fetch(`${GEMINI_URL}?key=${key}`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": "https://finedeal.app",
-      "X-Title": "FineDeal Price Comparison",
     },
     body: JSON.stringify({
-      model: "google/gemini-2.0-flash-001",
-      messages,
-      temperature,
-      max_tokens: 1024,
+      contents,
+      generationConfig: {
+        temperature,
+        maxOutputTokens: 1024,
+      },
     }),
   });
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`OpenRouter API error (${res.status}): ${err}`);
+    throw new Error(`Gemini API error (${res.status}): ${err}`);
   }
 
   const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? "";
+  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
 }
 
 function parseJsonResponse(raw: string) {
@@ -143,7 +147,7 @@ Respond with ONLY a JSON object (no markdown, no extra text):
   return parseJsonResponse(raw);
 }
 
-// --------------- OpenRouter functions (replaces Gemini) ---------------
+// --------------- Gemini functions ---------------
 
 export async function geminiClassify(productName: string) {
   const prompt = `Classify this product into one category (Electronics, Fashion, Home, Sports, Beauty, Books, Toys, Automotive, Grocery, Health).
@@ -153,7 +157,7 @@ Product: "${productName}"
 Respond with ONLY a JSON object (no markdown):
 {"category":"<category>","confidence":<0-1>,"tags":["tag1","tag2","tag3"]}`;
 
-  const raw = await openRouterChat([{ role: "user", content: prompt }]);
+  const raw = await geminiChat([{ role: "user", content: prompt }]);
   return parseJsonResponse(raw);
 }
 
@@ -167,11 +171,11 @@ ${listing}
 Respond with ONLY a JSON object (no markdown):
 {"summary":"<natural language summary>"}`;
 
-  const raw = await openRouterChat([{ role: "user", content: prompt }]);
+  const raw = await geminiChat([{ role: "user", content: prompt }]);
   return parseJsonResponse(raw);
 }
 
-// --------------- Scraped Price Analysis (OpenRouter/Gemini) ---------------
+// --------------- Scraped Price Analysis (Gemini) ---------------
 
 export async function analyzeScrapedPrices(
   query: string,
@@ -200,7 +204,7 @@ Analyze these results and respond with ONLY a JSON object (no markdown, no extra
   "shouldBuy": <true if now is a good time to buy, false if they should wait>
 }`;
 
-  const raw = await openRouterChat([{ role: "user", content: prompt }], 0.2);
+  const raw = await geminiChat([{ role: "user", content: prompt }], 0.2);
   return parseJsonResponse(raw);
 }
 
@@ -227,17 +231,17 @@ export async function checkApiConnectivity() {
     results.groq = { status: "error", error: e instanceof Error ? e.message : String(e) };
   }
 
-  // Check OpenRouter (replaces Gemini)
+  // Check Gemini (direct API)
   try {
-    const orKey = getOpenRouterKey();
-    if (!orKey) throw new Error("API key not configured");
-    const res = await fetch(OPENROUTER_URL, {
+    const geminiKey = getGeminiKey();
+    if (!geminiKey) throw new Error("API key not configured");
+    const res = await fetch(`${GEMINI_URL}?key=${geminiKey}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${orKey}`, "Content-Type": "application/json", "HTTP-Referer": "https://finedeal.app" },
-      body: JSON.stringify({ model: "google/gemini-2.0-flash-001", messages: [{ role: "user", content: "Reply with only: ok" }], max_tokens: 5 }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ parts: [{ text: "Reply with only: ok" }] }], generationConfig: { maxOutputTokens: 5 } }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    results.gemini = { status: "connected", model: "gemini-2.0-flash (OpenRouter)" };
+    results.gemini = { status: "connected", model: "gemini-3-flash-preview" };
   } catch (e: unknown) {
     results.gemini = { status: "error", error: e instanceof Error ? e.message : String(e) };
   }
