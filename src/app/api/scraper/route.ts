@@ -4,6 +4,23 @@ import { corsJson, corsError, handleOptions } from "@/lib/api-helpers";
 import { scrapeProduct, searchProduct, searchViaGoogle, ScrapeResult } from "@/lib/scraper";
 import { generateDealSummary, analyzeScrapedPrices } from "@/lib/ai";
 
+// Cache GROQ API key at module level to avoid reading .env.local on every request
+let _cachedGroqKey: string | null = null;
+function getGroqApiKey(): string {
+  if (_cachedGroqKey !== null) return _cachedGroqKey;
+  let key = process.env.GROQ_API_KEY || "";
+  if (!key) {
+    try {
+      const envPath = require("path").join(process.cwd(), ".env.local");
+      const envContent = require("fs").readFileSync(envPath, "utf8");
+      const match = envContent.match(/GROQ_API_KEY=(.+)/);
+      if (match) key = match[1].trim();
+    } catch {}
+  }
+  _cachedGroqKey = key;
+  return key;
+}
+
 /**
  * Clean a raw product title into a short, searchable query.
  * E.g. "iPhone 17 Pro 256 GB: 15.93 cm (6.3″) Display with Promotion up to 120Hz, A19 Pr"
@@ -28,7 +45,7 @@ function cleanSearchQuery(raw: string): string {
   q = q.replace(/\b\d+(\.\d+)?\s*(cm|inch|inches|mm)\b/gi, "");
   q = q.replace(/\b\d+\s*Hz\b/gi, "");
   q = q.replace(/\b(display|with\s+promotion|up\s+to|launched|latest|new|best|buy)\b/gi, "");
-  q = q.replace(/\b[A-Z]\d{1,2}\s*(Pr|Pro\s*chip|Bionic|Fusion)/gi, "");
+  q = q.replace(/\b[A-Z]\d{1,2}\s+(Pro\s*chip|Bionic|Fusion)\b/gi, "");
 
   // Remove warranty/feature/marketing clauses (common in Amazon titles after commas)
   q = q.replace(/,?\s*\d+\s*years?\s*(comprehensive\s*)?warranty[^,]*/gi, "");
@@ -131,6 +148,7 @@ export async function POST(req: NextRequest) {
 
     const startTime = Date.now();
     let results: ScrapeResult[];
+    let aiValidationRan = false;
     // Clean the query: strip specs, promo text, display sizes from raw product titles
     const cleanedQuery = query ? cleanSearchQuery(query) : "";
     if (query) console.log(`[Scraper] Raw query: "${query}" → Cleaned: "${cleanedQuery}"`);
@@ -202,16 +220,7 @@ export async function POST(req: NextRequest) {
           .filter(r => r.price)
           .map(r => ({ platform: r.platform, name: r.name, price: r.price }));
 
-        const groqKey = process.env.GROQ_API_KEY || "";
-        const envPath = require("path").join(process.cwd(), ".env.local");
-        let key = groqKey;
-        if (!key) {
-          try {
-            const envContent = require("fs").readFileSync(envPath, "utf8");
-            const match = envContent.match(/GROQ_API_KEY=(.+)/);
-            if (match) key = match[1].trim();
-          } catch {}
-        }
+        const key = getGroqApiKey();
 
         if (key) {
           const validationRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -247,6 +256,7 @@ Respond with ONLY a JSON object (no markdown):
             const jsonMatch = vText.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
               const validation = JSON.parse(jsonMatch[0]);
+              aiValidationRan = true;
               let priceIdx = 0;
               for (let i = 0; i < results.length; i++) {
                 if (results[i].price) {
@@ -361,9 +371,20 @@ Respond with ONLY a JSON object (no markdown):
       for (const r of results) {
         if (r.price) {
           const existing = products.find((p) => {
-            const pName = String(p.name ?? "");
-            return pName.toLowerCase().includes(r.name.toLowerCase().split(" ").slice(0, 3).join(" ")) ||
-              r.name.toLowerCase().includes(pName.toLowerCase().split(" ").slice(0, 3).join(" "));
+            const pName = String(p.name ?? "").toLowerCase();
+            const rName = r.name.toLowerCase();
+            // Match on first 5 words for better accuracy (3 words was too broad)
+            const pWords = pName.split(/\s+/).filter(w => w.length > 1).slice(0, 5).join(" ");
+            const rWords = rName.split(/\s+/).filter(w => w.length > 1).slice(0, 5).join(" ");
+            if (!pWords || !rWords) return false;
+            // Check URL domain match if product has a stored URL
+            const pUrl = String(p.url ?? "").toLowerCase();
+            const rUrl = r.url.toLowerCase();
+            let sameDomain = false;
+            try { sameDomain = !!(pUrl && rUrl && new URL(pUrl).hostname === new URL(rUrl).hostname); } catch {}
+            // Require domain match (if URLs available) AND name overlap on first 5 words
+            const nameMatch = pWords === rWords || pName.includes(rWords) || rName.includes(pWords);
+            return sameDomain ? nameMatch : (pWords === rWords);
           });
           if (existing) {
             const updates: Record<string, unknown> = { current_price: r.price, last_checked: r.scrapedAt };
@@ -379,9 +400,9 @@ Respond with ONLY a JSON object (no markdown):
     // === PHASE 6: Send Rich Telegram Notification ===
     try {
       const settings = getSettings();
-      const chatId = settings.telegram_chat_id || process.env.TELEGRAM_CHAT_ID || "8295267041";
-      const botToken = process.env.TELEGRAM_BOT_TOKEN || settings.telegram_bot_token || "8678431912:AAHbmx144AdF689XnfZibqpXtSd7LWejz68";
-      if (chatId && botToken && !botToken.includes("placeholder")) {
+      const chatId = settings.telegram_chat_id || process.env.TELEGRAM_CHAT_ID || "";
+      const botToken = process.env.TELEGRAM_BOT_TOKEN || settings.telegram_bot_token || "";
+      if (chatId && botToken) {
         const sortedPriceLines = results
           .filter(r => r.price)
           .sort((a, b) => a.price! - b.price!)
@@ -428,7 +449,7 @@ Respond with ONLY a JSON object (no markdown):
       message: "Scrape completed",
       duration_ms: durationMs,
       results,
-      ai_validated: true,
+      ai_validated: aiValidationRan,
       gemini_analysis: geminiAnalysis,
     });
   } catch {

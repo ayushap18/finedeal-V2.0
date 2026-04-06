@@ -19,7 +19,11 @@ export async function GET() {
 
         if (validResults.length > 0) {
           // Update all products matching this name
-          const matchingProducts = tracking.filter(p => String(p.name).toLowerCase().includes(name.toLowerCase().split(" ").slice(0, 3).join(" ")));
+          const nameWords = name.toLowerCase().split(/\s+/).filter(w => w.length > 1).slice(0, 5).join(" ");
+          const matchingProducts = tracking.filter(p => {
+            const pWords = String(p.name ?? "").toLowerCase().split(/\s+/).filter(w => w.length > 1).slice(0, 5).join(" ");
+            return pWords && nameWords && (pWords === nameWords || pWords.includes(nameWords) || nameWords.includes(pWords));
+          });
 
           for (const product of matchingProducts) {
             const bestResult = validResults[0];

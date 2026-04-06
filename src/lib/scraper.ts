@@ -197,6 +197,24 @@ function extractAmazon(html: string, url: string): ScrapeResult {
 }
 
 function extractFlipkart(html: string, url: string): ScrapeResult {
+  // Strategy 1: JSON-LD structured data (most reliable, not affected by CSS class changes)
+  try {
+    const jsonLdMatch = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/i);
+    if (jsonLdMatch) {
+      const ld = JSON.parse(jsonLdMatch[1]);
+      const product = Array.isArray(ld) ? ld.find((x: Record<string, unknown>) => x['@type'] === 'Product') : (ld['@type'] === 'Product' ? ld : null);
+      if (product) {
+        const ldName = product.name || '';
+        const offers = product.offers || {};
+        const price = offers.price || offers.lowPrice;
+        if (ldName && price) {
+          return { name: ldName, price: parseFloat(price), platform: "Flipkart", url, scrapedAt: new Date().toISOString() };
+        }
+      }
+    }
+  } catch { /* JSON-LD parse failed, fall through to CSS selectors */ }
+
+  // Strategy 2: CSS selector approach (fragile but covers pages without JSON-LD)
   const name =
     extractFirst(html, /<span[^>]*class="[^"]*VU-ZEz[^"]*"[^>]*>([\s\S]*?)<\/span>/i) ??
     extractFirst(html, /<span[^>]*class="[^"]*B_NuCI[^"]*"[^>]*>([\s\S]*?)<\/span>/i) ??
@@ -375,7 +393,7 @@ const SEARCH_URLS: Record<PlatformKey, (q: string) => string> = {
   amazon: (q) => `https://www.amazon.in/s?k=${encodeURIComponent(q)}`,
   flipkart: (q) => `https://www.flipkart.com/search?q=${encodeURIComponent(q)}`,
   croma: (q) => `https://www.croma.com/search/?text=${encodeURIComponent(q)}`,
-  myntra: (q) => `https://www.myntra.com/${encodeURIComponent(q.replace(/\s+/g, "-"))}`,
+  myntra: (q) => `https://www.myntra.com/search?q=${encodeURIComponent(q)}`,
   ajio: (q) => `https://www.ajio.com/search/?text=${encodeURIComponent(q)}&classifier=intent`,
   snapdeal: (q) => `https://www.snapdeal.com/search?keyword=${encodeURIComponent(q)}`,
   tatacliq: (q) => `https://www.tatacliq.com/search/?searchCategory=all&text=${encodeURIComponent(q)}`,
@@ -388,6 +406,19 @@ const SEARCH_URLS: Record<PlatformKey, (q: string) => string> = {
 function parseAmazonSearch(html: string, query: string): ScrapeResult {
   // Extract all search result cards and find the best match for the query
   const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  const queryLower = query.toLowerCase();
+
+  // Build brand/phrase keywords for boosting: split query into significant multi-word phrases
+  // e.g., "iPhone 17 Pro 256GB" -> try matching "iphone 17 pro", "iphone 17", "iphone"
+  const queryTokens = query.toLowerCase().split(/\s+/);
+  const brandPhrases: string[] = [];
+  // Generate contiguous phrases of length 3, 2, then 1 (prioritizing longer matches)
+  for (let len = Math.min(3, queryTokens.length); len >= 1; len--) {
+    for (let i = 0; i <= queryTokens.length - len; i++) {
+      const phrase = queryTokens.slice(i, i + len).join(" ");
+      if (phrase.length > 3) brandPhrases.push(phrase);
+    }
+  }
 
   // Pattern: each result card has a product title span and a price block
   // Title: <span class="a-size-medium ... a-text-normal"><span>PRODUCT NAME</span></span>
@@ -395,11 +426,12 @@ function parseAmazonSearch(html: string, query: string): ScrapeResult {
   // Link: /dp/ASIN
 
   // Extract product cards using data-asin (each search result has a unique ASIN)
-  const cardPattern = /<div\s+data-asin="([A-Z0-9]{10})"[^>]*>([\s\S]*?)(?=<div\s+data-asin="[A-Z0-9]{10}"|$)/gi;
-  interface CardInfo { asin: string; name: string; price: number; score: number }
+  const cardPattern = /<div\s+data-asin="([A-Z0-9]{10})"[^>]*>([\s\S]*?)(?=<div\s+data-asin="[A-Z0-9]{10}"|<div[^>]*class="[^"]*s-result-list-placeholder|<div[^>]*id="bottomBar)/gi;
+  interface CardInfo { asin: string; name: string; price: number; score: number; index: number }
   const cards: CardInfo[] = [];
 
   let cardMatch;
+  let cardIndex = 0;
   while ((cardMatch = cardPattern.exec(html)) !== null) {
     const asin = cardMatch[1];
     const cardHtml = cardMatch[2];
@@ -412,16 +444,36 @@ function parseAmazonSearch(html: string, query: string): ScrapeResult {
     const priceMatch = cardHtml.match(/class="a-price"[^>]*>[\s\S]*?class="a-offscreen">([^<]+)/i);
     const price = priceMatch ? cleanPrice(priceMatch[1]) : null;
 
-    if (!name || !price) continue;
+    if (!name || !price) { cardIndex++; continue; }
 
     // Score how well this product matches the query
+    // Also check link URLs and full card text for brand names (Amazon often shows brand separately)
     const nameLower = name.toLowerCase();
-    const queryLower = query.toLowerCase();
+    const cardTextLower = cardHtml.replace(/<[^>]+>/g, " ").toLowerCase();
     let score = 0;
 
-    // Match individual words
+    // Match individual words against card title
     const matchedWords = queryWords.filter(w => nameLower.includes(w));
     score = matchedWords.length / queryWords.length;
+
+    // Also check full card text (includes brand shown separately from title)
+    const cardMatchedWords = queryWords.filter(w => cardTextLower.includes(w));
+    const cardWordScore = cardMatchedWords.length / queryWords.length;
+    if (cardWordScore > score) {
+      score = (score + cardWordScore) / 2; // blend: title match still matters more
+    }
+
+    // Big bonus for exact phrase matches (e.g., "iphone 17 pro" as a contiguous phrase)
+    for (const phrase of brandPhrases) {
+      const words = phrase.split(" ");
+      if (words.length >= 2) {
+        if (nameLower.includes(phrase)) {
+          score += 0.3 * words.length; // huge bonus for multi-word phrase in title
+        } else if (cardTextLower.includes(phrase)) {
+          score += 0.15 * words.length; // smaller bonus for phrase in card text
+        }
+      }
+    }
 
     // Bonus: match numeric specs like "2 Ton", "3 Star", "1.5 Ton" as phrases
     const specPatterns = queryLower.match(/\d+\.?\d*\s*(?:ton|star|gb|tb|inch|cm|kg|watt|hp)/gi) || [];
@@ -433,31 +485,25 @@ function parseAmazonSearch(html: string, query: string): ScrapeResult {
       }
     }
 
-    cards.push({ asin, name, price, score });
+    cards.push({ asin, name, price, score, index: cardIndex });
+    cardIndex++;
   }
 
   // Pick the best matching card (highest score, then lowest price for ties)
   cards.sort((a, b) => b.score - a.score || a.price - b.price);
   const best = cards[0];
 
-  if (best && best.score >= 0.3) {
-    return {
-      name: best.name,
-      price: best.price,
-      platform: "Amazon.in",
-      url: `https://www.amazon.in/dp/${best.asin}`,
-      scrapedAt: new Date().toISOString(),
-    };
-  }
+  // If best card scores well, use it; otherwise trust Amazon's own ranking (first card)
+  const SCORE_THRESHOLD = 0.5;
+  const firstCard = cards.length > 0 ? cards.reduce((a, b) => a.index < b.index ? a : b) : null;
+  const chosen = (best && best.score >= SCORE_THRESHOLD) ? best : (firstCard || best);
 
-  // Fallback: first product with a price
-  const fallbackCard = cards[0];
-  if (fallbackCard) {
+  if (chosen) {
     return {
-      name: fallbackCard.name,
-      price: fallbackCard.price,
+      name: chosen.name,
+      price: chosen.price,
       platform: "Amazon.in",
-      url: `https://www.amazon.in/dp/${fallbackCard.asin}`,
+      url: `https://www.amazon.in/dp/${chosen.asin}`,
       scrapedAt: new Date().toISOString(),
     };
   }
@@ -973,6 +1019,109 @@ async function searchAjioAPI(query: string): Promise<ScrapeResult> {
   return { name: query, price: null, platform: "AJIO", url: fallbackUrl, scrapedAt: new Date().toISOString(), error: "AJIO blocked by WAF - browser scraper unavailable" };
 }
 
+// --- Myntra search API ---
+
+async function searchMyntraAPI(query: string): Promise<ScrapeResult> {
+  const fallbackUrl = `https://www.myntra.com/${encodeURIComponent(query.replace(/\s+/g, "-").toLowerCase())}`;
+  const searchUrl = `https://www.myntra.com/search?q=${encodeURIComponent(query)}`;
+
+  // Strategy 1: Myntra's internal search API (returns JSON with product data)
+  try {
+    const apiUrl = `https://www.myntra.com/gateway/v2/search/search?q=${encodeURIComponent(query)}&rows=10&o=0&platefrom=desktop`;
+    const res = await fetch(apiUrl, {
+      headers: {
+        "User-Agent": randomUA(),
+        "Accept": "application/json",
+        "Referer": "https://www.myntra.com/",
+        "Origin": "https://www.myntra.com",
+        "X-Requested-With": "browser",
+      },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const products = data?.products || data?.results || data?.data?.results || [];
+      if (products.length > 0) {
+        const p = products[0];
+        const name = p.productName || p.name || p.brand + " " + (p.productName || p.name || "") || query;
+        const price = p.price || p.discountedPrice || p.mrp || null;
+        const productUrl = p.landingPageUrl
+          ? `https://www.myntra.com/${p.landingPageUrl}`
+          : (p.id ? `https://www.myntra.com/product/${p.id}` : searchUrl);
+        return {
+          name: String(name).replace(/\s+/g, " ").trim(),
+          price: typeof price === "number" ? price : (price ? cleanPrice(String(price)) : null),
+          platform: "Myntra",
+          url: productUrl,
+          scrapedAt: new Date().toISOString(),
+        };
+      }
+    }
+  } catch { /* fall through */ }
+
+  // Strategy 2: Browser scraper (Myntra is a SPA, HTML fetch returns empty containers)
+  try {
+    const { searchWithBrowser } = await import("./browser-scraper");
+    const result = await searchWithBrowser(query, "myntra");
+    if (result.price && result.price > 0) {
+      result.platform = "Myntra";
+      return result;
+    }
+  } catch { /* fall through */ }
+
+  // Strategy 3: Fetch the search page HTML and try to extract from embedded JSON/script data
+  try {
+    const html = await fetchHtml(searchUrl, "myntra");
+    if (html.length > 500) {
+      // Myntra embeds product data in a script tag as JSON (window.__myx or similar)
+      const scriptDataMatch = html.match(/window\.__myx\s*=\s*(\{[\s\S]*?\});?\s*<\/script>/i) ??
+        html.match(/"searchData"\s*:\s*(\{[\s\S]*?"products"\s*:\s*\[[\s\S]*?\][\s\S]*?\})/i);
+
+      if (scriptDataMatch) {
+        try {
+          const scriptData = JSON.parse(scriptDataMatch[1]);
+          const products = scriptData?.products || scriptData?.searchData?.products || [];
+          if (products.length > 0) {
+            const p = products[0];
+            return {
+              name: (p.productName || p.name || query).replace(/\s+/g, " ").trim(),
+              price: p.price || p.discountedPrice || p.mrp || null,
+              platform: "Myntra",
+              url: p.landingPageUrl ? `https://www.myntra.com/${p.landingPageUrl}` : searchUrl,
+              scrapedAt: new Date().toISOString(),
+            };
+          }
+        } catch { /* JSON parse failed */ }
+      }
+
+      // Also try generic JSON price patterns in the HTML
+      const priceRaw =
+        extractFirst(html, /"discountedPrice"\s*:\s*"?([\d,]+)"?/i) ??
+        extractFirst(html, /"price"\s*:\s*"?([\d,]+)"?/i) ??
+        extractFirst(html, /"sellingPrice"\s*:\s*"?([\d,]+)"?/i);
+      const nameRaw =
+        extractFirst(html, /"productName"\s*:\s*"([^"]+)"/i) ??
+        extractFirst(html, /"name"\s*:\s*"([^"]+)"/i);
+
+      if (priceRaw) {
+        const price = cleanPrice(priceRaw);
+        if (price && price > 50) {
+          return {
+            name: (nameRaw || query).replace(/\s+/g, " ").trim(),
+            price,
+            platform: "Myntra",
+            url: searchUrl,
+            scrapedAt: new Date().toISOString(),
+          };
+        }
+      }
+    }
+  } catch { /* fall through */ }
+
+  return { name: query, price: null, platform: "Myntra", url: searchUrl, scrapedAt: new Date().toISOString(), error: "Myntra is a SPA - browser scraper unavailable and API did not respond" };
+}
+
 // --- Snapdeal product listing API ---
 
 async function searchSnapdealAPI(query: string): Promise<ScrapeResult> {
@@ -1149,9 +1298,10 @@ const ALL_PLATFORMS: PlatformKey[] = ["amazon", "flipkart", "croma", "myntra", "
 
 function detectCategory(query: string): "electronics" | "fashion" | "beauty" | "general" {
   const q = query.toLowerCase();
-  const elecScore = ELECTRONICS_KEYWORDS.filter(kw => q.includes(kw)).length;
-  const fashScore = FASHION_KEYWORDS.filter(kw => q.includes(kw)).length;
-  const beautyScore = BEAUTY_KEYWORDS.filter(kw => q.includes(kw)).length;
+  const matchKw = (kw: string) => new RegExp("\\b" + kw + "\\b", "i").test(q);
+  const elecScore = ELECTRONICS_KEYWORDS.filter(matchKw).length;
+  const fashScore = FASHION_KEYWORDS.filter(matchKw).length;
+  const beautyScore = BEAUTY_KEYWORDS.filter(matchKw).length;
 
   if (elecScore > 0 && elecScore >= fashScore && elecScore >= beautyScore) return "electronics";
   if (fashScore > 0 && fashScore >= elecScore && fashScore >= beautyScore) return "fashion";
@@ -1191,15 +1341,16 @@ export async function searchProduct(
   // Wrap each platform search with a 20-second timeout to prevent hanging
   const PLATFORM_TIMEOUT = 20000;
   function withTimeout(promise: Promise<ScrapeResult>, platform: string): Promise<ScrapeResult> {
+    let timer: ReturnType<typeof setTimeout>;
     return Promise.race([
-      promise,
-      new Promise<ScrapeResult>((resolve) =>
-        setTimeout(() => resolve({
+      promise.then(r => { clearTimeout(timer); return r; }),
+      new Promise<ScrapeResult>((resolve) => {
+        timer = setTimeout(() => resolve({
           name, price: null, platform, url: "",
           scrapedAt: new Date().toISOString(),
           error: `Timeout: ${platform} took longer than ${PLATFORM_TIMEOUT / 1000}s`,
-        }), PLATFORM_TIMEOUT)
-      ),
+        }), PLATFORM_TIMEOUT);
+      }),
     ]);
   }
 
@@ -1211,6 +1362,7 @@ export async function searchProduct(
     if (platform === "ajio") return withTimeout(searchAjioAPI(name), "AJIO");
     if (platform === "snapdeal") return withTimeout(searchSnapdealAPI(name), "Snapdeal");
     if (platform === "tatacliq") return withTimeout(searchTataCliq(name), "Tata CLiQ");
+    if (platform === "myntra") return withTimeout(searchMyntraAPI(name), "Myntra");
 
     const searchUrl = SEARCH_URLS[platform](name);
     return withTimeout((async () => {
@@ -1235,47 +1387,10 @@ export async function searchProduct(
 }
 
 /**
- * Fallback: Use Google Shopping results to find prices when direct scraping fails.
- * This is a last resort for sites that block direct server-side requests.
+ * @deprecated Google blocks automated scraping, and the previous implementation
+ * incorrectly assigned the same price to every platform mentioned on the page.
+ * Use searchProduct() with direct platform scrapers instead.
  */
-export async function searchViaGoogle(productName: string): Promise<ScrapeResult[]> {
-  const query = encodeURIComponent(`${productName} price India buy`);
-  const url = `https://www.google.com/search?q=${query}&gl=in&hl=en`;
-
-  try {
-    const html = await fetchHtml(url, null);
-    const results: ScrapeResult[] = [];
-
-    // Extract prices from Google search results
-    const pricePattern = /₹[\s]*[\d,]+(?:\.\d{2})?/g;
-    const prices = html.match(pricePattern) || [];
-
-    // Extract site mentions
-    const sitePatterns: { pattern: RegExp; platform: string }[] = [
-      { pattern: /amazon\.in/gi, platform: "Amazon.in" },
-      { pattern: /flipkart\.com/gi, platform: "Flipkart" },
-      { pattern: /ajio\.com/gi, platform: "AJIO" },
-      { pattern: /vijaysales\.com/gi, platform: "Vijay Sales" },
-    ];
-
-    for (const sp of sitePatterns) {
-      if (sp.pattern.test(html) && prices.length > 0) {
-        const priceStr = prices[0]!;
-        const price = cleanPrice(priceStr);
-        if (price && price > 100) {
-          results.push({
-            name: productName,
-            price,
-            platform: sp.platform,
-            url: `https://www.google.com/search?q=${encodeURIComponent(productName + " " + sp.platform)}`,
-            scrapedAt: new Date().toISOString(),
-          });
-        }
-      }
-    }
-
-    return results;
-  } catch {
-    return [];
-  }
+export async function searchViaGoogle(_productName: string): Promise<ScrapeResult[]> {
+  return [];
 }

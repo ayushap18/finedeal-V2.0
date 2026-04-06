@@ -5,6 +5,39 @@ let playwrightAvailable = true;
 let lastPlaywrightCheck = 0;
 const PLAYWRIGHT_RETRY_INTERVAL = 300000; // 5 minutes
 
+// Shared browser instance with timeout-based cleanup
+let sharedBrowser: any = null;
+let browserLastUsed = 0;
+let cleanupInterval: ReturnType<typeof setInterval> | null = null;
+
+async function getBrowser() {
+  if (sharedBrowser) {
+    try {
+      if (sharedBrowser.isConnected()) {
+        browserLastUsed = Date.now();
+        return sharedBrowser;
+      }
+    } catch {}
+    sharedBrowser = null;
+  }
+  const { chromium } = await import("playwright");
+  sharedBrowser = await chromium.launch({ headless: true });
+  browserLastUsed = Date.now();
+  // Auto-close after 2 minutes of inactivity
+  if (cleanupInterval) clearInterval(cleanupInterval);
+  cleanupInterval = setInterval(() => {
+    if (Date.now() - browserLastUsed > 120000 && sharedBrowser) {
+      sharedBrowser.close().catch(() => {});
+      sharedBrowser = null;
+      if (cleanupInterval) {
+        clearInterval(cleanupInterval);
+        cleanupInterval = null;
+      }
+    }
+  }, 30000);
+  return sharedBrowser;
+}
+
 /**
  * Scrape a site using a headless browser (Playwright Chromium).
  * Falls back gracefully if Playwright is not available.
@@ -18,19 +51,18 @@ export async function scrapeWithBrowser(url: string, platform: string): Promise<
   if (!playwrightAvailable) playwrightAvailable = true;
 
   try {
-    const { chromium } = await import("playwright");
-    const browser = await chromium.launch({ headless: true });
+    const browser = await getBrowser();
 
+    const context = await browser.newContext({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      locale: "en-IN",
+      viewport: { width: 1366, height: 768 },
+    });
     try {
-      const context = await browser.newContext({
-        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        locale: "en-IN",
-        viewport: { width: 1366, height: 768 },
-      });
       const page = await context.newPage();
 
       // Block images/fonts/media for speed
-      await page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,mp4,webm}", (route) => route.abort());
+      await page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,mp4,webm}", (route: any) => route.abort());
 
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
       // Wait a bit for JS to render prices
@@ -82,7 +114,7 @@ export async function scrapeWithBrowser(url: string, platform: string): Promise<
       // Try extracting from page data attributes or JSON-LD
       if (!price) {
         try {
-          const jsonLd = await page.$eval('script[type="application/ld+json"]', (el) => el.textContent);
+          const jsonLd = await page.$eval('script[type="application/ld+json"]', (el: any) => el.textContent);
           if (jsonLd) {
             const parsed = JSON.parse(jsonLd);
             const offers = parsed.offers || parsed;
@@ -120,7 +152,7 @@ export async function scrapeWithBrowser(url: string, platform: string): Promise<
         } catch { continue; }
       }
 
-      await browser.close();
+      await context.close();
 
       return {
         name: productName,
@@ -131,7 +163,7 @@ export async function scrapeWithBrowser(url: string, platform: string): Promise<
         error: price ? undefined : "Price not found even with browser rendering",
       };
     } catch (err) {
-      await browser.close();
+      await context.close().catch(() => {});
       throw err;
     }
   } catch (err) {

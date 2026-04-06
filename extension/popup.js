@@ -281,6 +281,9 @@
     if (!comparisonResults) return;
     const { results, stats, ai } = comparisonResults;
 
+    // Filter out invalid results early so we can reference validResults in score logic
+    const validResults = (results || []).filter((r) => r.price > 0);
+
     // Deal score - use Gemini AI score if available
     const score = ai?.dealScore || stats.dealScore || 0;
     const confidence = ai?.confidence || 0;
@@ -317,8 +320,7 @@
     const list = document.getElementById('results-list');
     list.innerHTML = '';
 
-    // Filter out ₹0 and irrelevant results
-    const validResults = (results || []).filter((r) => r.price > 0);
+    // Check if any valid results exist
     if (validResults.length === 0) {
       list.innerHTML = '<div class="no-results" style="text-align:center;padding:20px;color:#888;">No valid prices found. Try searching again.</div>';
       return;
@@ -481,6 +483,17 @@
       ctx.font = '13px Manrope, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('No history data available', W / 2, H / 2);
+      return;
+    }
+
+    if (history.length === 1) {
+      ctx.fillStyle = '#F97316';
+      ctx.font = '600 13px Manrope, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(fmt(history[0].price), W / 2, H / 2 - 10);
+      ctx.fillStyle = '#666';
+      ctx.font = '11px Manrope, sans-serif';
+      ctx.fillText('Only 1 data point available', W / 2, H / 2 + 10);
       return;
     }
 

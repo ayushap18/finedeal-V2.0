@@ -4,6 +4,10 @@ const API_BASE = 'http://localhost:3000/api';
 
 // Current detected product state
 let currentProduct = null;
+// Rehydrate from storage on service worker startup (MV3 idle termination recovery)
+chrome.storage.local.get('currentProduct', (data) => {
+  if (data.currentProduct) currentProduct = data.currentProduct;
+});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender).then(sendResponse).catch((err) => {
@@ -71,9 +75,9 @@ async function handleComparePrices(data) {
   const product = data || currentProduct;
   if (!product) return { success: false, error: 'No product detected' };
 
+  let cachedResults = [];
   try {
     // Fast path: check DB for existing price data first
-    let cachedResults = [];
     try {
       const dbResp = await fetch(`${API_BASE}/products?search=${encodeURIComponent(product.title.substring(0, 40))}`);
       if (dbResp.ok) {
@@ -142,20 +146,11 @@ async function handleComparePrices(data) {
       ? Math.min(99, Math.round(((avgPrice - lowestPrice) / avgPrice) * 100 + 50))
       : 0;
 
-    // Find lowest ever from DB products
+    // Find lowest ever from already-fetched DB products (reuse cachedResults data)
     let lowestEver = lowestPrice;
-    try {
-      const dbResp = await fetch(`${API_BASE}/products?search=${encodeURIComponent(product.title.substring(0, 40))}`);
-      if (dbResp.ok) {
-        const dbData = await dbResp.json();
-        const dbProducts = dbData.products || [];
-        for (const p of dbProducts) {
-          const pLow = p.lowest_price || p.current_price || Infinity;
-          if (pLow < lowestEver) lowestEver = pLow;
-        }
-      }
-    } catch {
-      // lowestEver stays as lowestPrice
+    for (const cr of cachedResults) {
+      const pLow = cr.price || Infinity;
+      if (pLow < lowestEver) lowestEver = pLow;
     }
 
     // Extract Gemini analysis from the scraper API response
@@ -307,15 +302,19 @@ async function handleGetHistory(data) {
     let aiPrediction = null;
     if (priceHistory.length >= 2) {
       try {
+        const aiController = new AbortController();
+        const aiTimeout = setTimeout(() => aiController.abort(), 10000);
         const aiResp = await fetch(`${API_BASE}/ai`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: aiController.signal,
           body: JSON.stringify({
             action: 'analyze',
             product: productTitle,
             history: priceHistory.slice(-10).map(h => ({ date: h.date, price: h.price })),
           }),
         });
+        clearTimeout(aiTimeout);
         if (aiResp.ok) {
           const aiData = await aiResp.json();
           if (aiData.result) {

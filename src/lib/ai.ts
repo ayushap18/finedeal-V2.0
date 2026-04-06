@@ -46,6 +46,7 @@ async function groqChat(messages: { role: string; content: string }[], temperatu
       Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
     },
+    signal: AbortSignal.timeout(15000),
     body: JSON.stringify({
       model: "llama-3.3-70b-versatile",
       messages,
@@ -80,6 +81,7 @@ async function geminiChat(messages: { role: string; content: string }[], tempera
     headers: {
       "Content-Type": "application/json",
     },
+    signal: AbortSignal.timeout(15000),
     body: JSON.stringify({
       contents,
       generationConfig: {

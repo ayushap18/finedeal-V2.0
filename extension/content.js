@@ -31,8 +31,16 @@
     'flipkart.com': {
       name: 'Flipkart',
       selectors: {
-        title: ['._35KyD6', '.VU-ZEz', '.B_NuCI', 'h1 span', '.KalC6f'],
+        title: [
+          'span[data-testid="product-title"]',
+          'h1[data-testid="product-title"]',
+          'div[data-testid="product-title"] span',
+          '._35KyD6', '.VU-ZEz', '.B_NuCI', 'h1 span', '.KalC6f'
+        ],
         price: [
+          'div[data-testid="price-display"] div',
+          'div[class*="CEmiEU"] div',
+          'div[class*="Nx9bqj"]',
           '._30jeq3',
           '._30jeq3._1_WHN1',
           '.CEmiEU div',
@@ -41,11 +49,16 @@
           '.Nx9bqj',
           'div[class*="CxhGGd"]'
         ],
-        image: ['._396cs4 img', '._2r_T1I img', '.CXW8mj img', '._396cs4 ._2r_T1I', '.DByuf4 img'],
+        image: [
+          'div[data-testid="image-container"] img',
+          '._396cs4 img', '._2r_T1I img', '.CXW8mj img', '._396cs4 ._2r_T1I', '.DByuf4 img'
+        ],
         brand: ['._2whKao', '.G6XhRU'],
         category: ['._1MR4o5', '._2whKao']
       },
       isProductPage: () =>
+        window.location.pathname.includes('/p/') ||
+        !!document.querySelector('meta[property="og:type"][content="product"]') ||
         !!document.querySelector('._35KyD6') ||
         !!document.querySelector('.VU-ZEz') ||
         !!document.querySelector('.B_NuCI') ||
@@ -115,14 +128,37 @@
     'nykaa.com': {
       name: 'Nykaa',
       selectors: {
-        title: ['h1.css-1gc4x7i', '.product-name h1'],
-        price: ['.css-1jczs19', '.post-card__content-price-offer'],
-        image: ['.product-images img', '.css-gkjhh3 img'],
-        brand: ['.css-rfn48a', '.product-brand'],
+        title: [
+          'h1[class*="product-title"]',
+          '.product-detail h1',
+          'h1.css-1gc4x7i',
+          '.product-name h1',
+          'h1'
+        ],
+        price: [
+          'span[class*="price"]',
+          'div[class*="price-info"] span',
+          '.css-1jczs19',
+          '.post-card__content-price-offer'
+        ],
+        image: [
+          '.product-images img',
+          'div[class*="product-image"] img',
+          '.css-gkjhh3 img',
+          'img[class*="product"]'
+        ],
+        brand: [
+          'a[class*="brand"]',
+          'h1 + a',
+          '.css-rfn48a',
+          '.product-brand'
+        ],
         category: ['.breadcrumb a']
       },
       isProductPage: () =>
-        !!document.querySelector('h1.css-1gc4x7i') || window.location.pathname.includes('/p/')
+        window.location.pathname.includes('/p/') ||
+        !!document.querySelector('meta[property="og:type"][content="product"]') ||
+        !!document.querySelector('h1.css-1gc4x7i')
     },
     'vijaysales.com': {
       name: 'Vijay Sales',
@@ -167,8 +203,9 @@
 
   function parsePrice(raw) {
     if (!raw) return 0;
-    const cleaned = raw.replace(/[^\d.]/g, '');
-    return parseFloat(cleaned) || 0;
+    const match = raw.match(/[\d,]+(?:\.\d{1,2})?/);
+    if (!match) return 0;
+    return parseFloat(match[0].replace(/,/g, '')) || 0;
   }
 
   function extractWithMeta() {
