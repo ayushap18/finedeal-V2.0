@@ -104,6 +104,10 @@ async function handleComparePrices(data) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 45000);
 
+    // Detect which site the user is currently on to avoid re-searching it
+    const currentSite = product.site || product.domain || '';
+    const currentSiteLower = currentSite.toLowerCase();
+
     // Don't specify platforms - let the server auto-select based on product category
     // Server-side query cleaning extracts product name from verbose titles
     const response = await fetch(`${API_BASE}/scraper`, {
@@ -134,6 +138,39 @@ async function handleComparePrices(data) {
         inStock: r.in_stock !== false,
         discount: r.discount || 0
       }));
+
+    // Replace the server's result for the current site with the ACTUAL page price
+    // (the server searches by text and may find a different listing/variant)
+    if (product.price && product.price > 0 && currentSiteLower) {
+      const siteNameMap = {
+        'amazon': 'Amazon.in', 'flipkart': 'Flipkart', 'croma': 'Croma',
+        'myntra': 'Myntra', 'ajio': 'AJIO', 'snapdeal': 'Snapdeal',
+        'tatacliq': 'Tata CLiQ', 'nykaa': 'Nykaa', 'vijaysales': 'Vijay Sales'
+      };
+      const matchSite = Object.keys(siteNameMap).find(k => currentSiteLower.includes(k));
+      const displayName = matchSite ? siteNameMap[matchSite] : currentSite;
+
+      // Remove the server's scraped result for this site (it may have wrong price)
+      const idx = results.findIndex(r =>
+        r.site.toLowerCase().includes(currentSiteLower) ||
+        (matchSite && r.site.toLowerCase().includes(matchSite))
+      );
+      if (idx >= 0) results.splice(idx, 1);
+
+      // Insert the real price from the page the user is actually viewing
+      results.push({
+        id: product.url || 'current',
+        title: product.title,
+        price: product.price,
+        originalPrice: product.originalPrice || 0,
+        site: displayName,
+        url: product.url || '',
+        image: product.image || '',
+        rating: null,
+        inStock: true,
+        discount: 0
+      });
+    }
 
     // Sort by price ascending
     results.sort((a, b) => (a.price || Infinity) - (b.price || Infinity));
