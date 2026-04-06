@@ -1,5 +1,6 @@
 import cron from "node-cron";
-import { create } from "@/lib/db";
+import { logger } from "./logger";
+import { rotateLogs } from "./log-rotation";
 
 let _scheduled = false;
 
@@ -51,19 +52,22 @@ async function triggerEndpoint(job: ScheduledJob): Promise<void> {
       },
     });
 
-    create("system_logs", {
-      level: res.ok ? "info" : "warning",
-      message: `Cron [${job.name}]: ${res.ok ? "completed" : `failed (${res.status})`}`,
-      source: "scheduler",
-      details: JSON.stringify({ endpoint: job.endpoint, status: res.status }),
-    });
+    if (res.ok) {
+      logger.info("scheduler", `Cron [${job.name}]: completed`, {
+        endpoint: job.endpoint,
+        status: res.status,
+      });
+    } else {
+      logger.warn("scheduler", `Cron [${job.name}]: failed (${res.status})`, {
+        endpoint: job.endpoint,
+        status: res.status,
+      });
+    }
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : "Unknown error";
-    create("system_logs", {
-      level: "error",
-      message: `Cron [${job.name}]: ${errorMsg}`,
-      source: "scheduler",
-      details: JSON.stringify({ endpoint: job.endpoint, error: errorMsg }),
+    logger.error("scheduler", `Cron [${job.name}]: ${errorMsg}`, {
+      endpoint: job.endpoint,
+      error: errorMsg,
     });
   }
 }
@@ -83,14 +87,33 @@ export function initScheduler(): void {
     console.log(`[FineDeal] Scheduled: ${job.name} (${job.schedule})`);
   }
 
-  create("system_logs", {
-    level: "info",
-    message: `Scheduler initialized — ${JOBS.filter((j) => j.enabled).length} jobs active`,
-    source: "scheduler",
-    details: JSON.stringify(
-      JOBS.filter((j) => j.enabled).map((j) => ({ name: j.name, schedule: j.schedule }))
-    ),
+  logger.info(
+    "scheduler",
+    `Scheduler initialized — ${JOBS.filter((j) => j.enabled).length} jobs active`,
+    JOBS.filter((j) => j.enabled).map((j) => ({
+      name: j.name,
+      schedule: j.schedule,
+    }))
+  );
+
+  // Log rotation — runs daily at 3 AM
+  cron.schedule("0 3 * * *", () => {
+    try {
+      const deleted = rotateLogs(30);
+      if (deleted > 0) {
+        logger.info(
+          "scheduler",
+          `Log rotation: deleted ${deleted} entries older than 30 days`
+        );
+      }
+    } catch (err) {
+      logger.error(
+        "scheduler",
+        `Log rotation failed: ${err instanceof Error ? err.message : "Unknown"}`
+      );
+    }
   });
+  console.log("[FineDeal] Scheduled: Log Rotation (0 3 * * *)");
 }
 
 export function getScheduledJobs(): ScheduledJob[] {

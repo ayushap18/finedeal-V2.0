@@ -8,6 +8,7 @@ import {
   parsePagination,
 } from "@/lib/api-helpers";
 import { validate, productSchema } from "@/lib/validate";
+import { cache } from "@/lib/cache";
 
 export async function GET(req: NextRequest) {
   try {
@@ -77,6 +78,9 @@ export async function POST(req: NextRequest) {
         0,
       last_checked: new Date().toISOString(),
     });
+
+    cache.invalidatePattern("products:");
+    cache.invalidatePattern("analytics:");
 
     return corsJson({ product }, 201, req);
   } catch {
