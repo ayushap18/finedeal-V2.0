@@ -32,6 +32,7 @@ yarn-error.log*
 # data
 data/db.json
 data/users.json
+data/backups/
 
 # playwright
 /test-results/

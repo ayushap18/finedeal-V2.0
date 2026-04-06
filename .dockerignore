@@ -4,6 +4,7 @@ node_modules
 .env.local
 data/*.db
 data/*.json
+data/backups/
 *.md
 tests/
 .vscode/

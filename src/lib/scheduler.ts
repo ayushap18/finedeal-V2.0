@@ -1,6 +1,8 @@
 import cron from "node-cron";
 import { logger } from "./logger";
 import { rotateLogs } from "./log-rotation";
+import { create } from "@/lib/db";
+import { createBackup } from "./backup";
 
 let _scheduled = false;
 
@@ -114,6 +116,28 @@ export function initScheduler(): void {
     }
   });
   console.log("[FineDeal] Scheduled: Log Rotation (0 3 * * *)");
+
+  // Database backup — runs daily at 2 AM
+  cron.schedule("0 2 * * *", () => {
+    try {
+      const result = createBackup();
+      const sizeMb = (result.sizeBytes / 1024 / 1024).toFixed(2);
+      create("system_logs", {
+        level: "success",
+        message: `Database backup created: ${sizeMb} MB`,
+        source: "scheduler",
+        details: JSON.stringify(result),
+      });
+    } catch (err) {
+      create("system_logs", {
+        level: "error",
+        message: `Database backup failed: ${err instanceof Error ? err.message : "Unknown"}`,
+        source: "scheduler",
+        details: String(err),
+      });
+    }
+  });
+  console.log("[FineDeal] Scheduled: Database Backup (0 2 * * *)");
 }
 
 export function getScheduledJobs(): ScheduledJob[] {
