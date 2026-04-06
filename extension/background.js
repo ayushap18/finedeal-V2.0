@@ -58,7 +58,7 @@ async function handleProductDetected(product) {
           email: stored.userEmail || undefined,
           telegram_chat_id: stored.telegramChatId || undefined,
           browser: 'Chrome',
-          extension_version: '4.3.0',
+          extension_version: '5.0.0',
         })
       });
     }
@@ -98,15 +98,16 @@ async function handleComparePrices(data) {
     } catch { /* DB check is best-effort */ }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    const timeout = setTimeout(() => controller.abort(), 45000);
 
+    // Don't specify platforms - let the server auto-select based on product category
+    // Server-side query cleaning extracts product name from verbose titles
     const response = await fetch(`${API_BASE}/scraper`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: controller.signal,
       body: JSON.stringify({
-        query: product.title.substring(0, 80),
-        platforms: ['amazon', 'flipkart', 'croma', 'myntra', 'ajio', 'snapdeal', 'tatacliq', 'nykaa', 'vijaysales']
+        query: product.title
       })
     });
 
@@ -116,10 +117,10 @@ async function handleComparePrices(data) {
 
     const apiData = await response.json();
     const results = (apiData.results || [])
-      .filter((r) => r.price && r.price > 0)
+      .filter((r) => r.price && r.price > 0 && !r.error)
       .map((r) => ({
         id: r.id || r.url,
-        title: r.title || r.name || product.title,
+        title: r.name || r.title || product.title,
         price: r.price || r.current_price || 0,
         originalPrice: r.original_price || r.mrp || 0,
         site: r.platform || r.site || r.source || 'Unknown',

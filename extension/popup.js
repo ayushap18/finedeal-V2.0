@@ -177,14 +177,15 @@
     const text = document.getElementById('progress-text');
 
     bar.style.width = '5%';
-    text.textContent = 'Phase 1: Scraping 9 platforms...';
+    text.textContent = 'Searching best prices...';
 
     // Animate progress with pipeline phases
     let progress = 5;
     const phases = [
-      { at: 50, text: 'Phase 2: Groq AI validating results...' },
-      { at: 70, text: 'Phase 3: Gemini analyzing deals...' },
-      { at: 90, text: 'Phase 4: Sending to Telegram...' },
+      { at: 30, text: 'Scraping e-commerce sites...' },
+      { at: 50, text: 'AI validating product matches...' },
+      { at: 70, text: 'Gemini analyzing deals...' },
+      { at: 90, text: 'Finalizing results...' },
     ];
     const progressInterval = setInterval(() => {
       progress = Math.min(progress + 2, 85);
@@ -224,7 +225,17 @@
 
     if (resp.success) {
       // Animate site status indicators based on actual results
-      const foundSites = new Set((resp.results || []).map((r) => (r.site || '').toLowerCase()));
+      // Map platform names to match SITES domain names (Amazon.in → amazon, Flipkart → flipkart, etc.)
+      const platformToSiteName = {
+        'amazon.in': 'amazon', 'amazon': 'amazon', 'flipkart': 'flipkart',
+        'croma': 'croma', 'myntra': 'myntra', 'ajio': 'ajio',
+        'snapdeal': 'snapdeal', 'tata cliq': 'tata cliq', 'nykaa': 'nykaa',
+        'vijay sales': 'vijay sales'
+      };
+      const foundSites = new Set((resp.results || []).map((r) => {
+        const p = (r.site || '').toLowerCase();
+        return platformToSiteName[p] || p;
+      }));
 
       for (let i = 0; i < SITES.length; i++) {
         const site = SITES[i];
@@ -272,26 +283,33 @@
 
     // Deal score - use Gemini AI score if available
     const score = ai?.dealScore || stats.dealScore || 0;
+    const confidence = ai?.confidence || 0;
     document.getElementById('deal-score-value').textContent = score;
 
     // Show Gemini AI recommendation if available
     let scoreDesc = '';
     if (ai?.recommendation) {
       scoreDesc = ai.recommendation;
+    } else if (confidence > 0 && confidence < 20) {
+      scoreDesc = 'Low confidence in results. Product may not be available or prices are unreliable.';
     } else if (score >= 80) {
       scoreDesc = 'Excellent deal! This is significantly below average price.';
     } else if (score >= 60) {
       scoreDesc = 'Good deal. Price is below the average across sites.';
     } else if (score >= 40) {
       scoreDesc = 'Average pricing. Consider waiting for a better deal.';
+    } else if (validResults.length <= 1) {
+      scoreDesc = 'Only found on 1 site. Compare manually for best deal.';
     } else {
       scoreDesc = 'Not a great deal right now. Prices have been lower.';
     }
     document.getElementById('deal-score-desc').textContent = scoreDesc;
 
-    // Update deal score ring color
+    // Update deal score ring color based on confidence and score
     const ring = document.querySelector('.deal-score-ring');
-    if (score >= 70) ring.style.borderColor = '#4ADE80';
+    if (confidence > 0 && confidence < 20) ring.style.borderColor = '#F87171';
+    else if (ai?.shouldBuy === false) ring.style.borderColor = '#F87171';
+    else if (score >= 70) ring.style.borderColor = '#4ADE80';
     else if (score >= 40) ring.style.borderColor = '#F97316';
     else ring.style.borderColor = '#F87171';
 

@@ -186,9 +186,14 @@ function extractCroma(html: string, url: string): ScrapeResult {
     extractFirst(html, /<title[^>]*>([\s\S]*?)<\/title>/i) ??
     "Unknown Product";
 
+  // Try multiple price extraction strategies for Croma
   const priceRaw =
     extractFirst(html, /<span[^>]*class="[^"]*amount[^"]*"[^>]*>([^<]+)<\/span>/i) ??
-    extractFirst(html, /<span[^>]*class="[^"]*pdpPrice[^"]*"[^>]*>([^<]+)<\/span>/i);
+    extractFirst(html, /<span[^>]*class="[^"]*pdpPrice[^"]*"[^>]*>([^<]+)<\/span>/i) ??
+    // Croma embeds prices in script/__NEXT_DATA__ JSON
+    extractFirst(html, /"sellingPrice"\s*:\s*"?([\d,]+)"?/i) ??
+    extractFirst(html, /"price"\s*:\s*"?([\d,]+)"?/i) ??
+    extractFirst(html, /"offerPrice"\s*:\s*"?([\d,]+)"?/i);
 
   return {
     name: name.replace(/\s+/g, " ").trim(),
@@ -337,7 +342,7 @@ const SEARCH_URLS: Record<PlatformKey, (q: string) => string> = {
   snapdeal: (q) => `https://www.snapdeal.com/search?keyword=${encodeURIComponent(q)}`,
   tatacliq: (q) => `https://www.tatacliq.com/search/?searchCategory=all&text=${encodeURIComponent(q)}`,
   nykaa: (q) => `https://www.nykaa.com/search/result/?q=${encodeURIComponent(q)}`,
-  vijaysales: (q) => `https://www.vijaysales.com/catalogsearch/result?q=${encodeURIComponent(q)}`,
+  vijaysales: (q) => `https://www.vijaysales.com/search/-/results?q=${encodeURIComponent(q)}&category=all`,
 };
 
 // Extract first result from search pages
@@ -395,6 +400,37 @@ function parseGenericSearch(html: string, query: string, platform: string, url: 
   // Extract ALL products with their names and prices from the HTML
   // Look for patterns where product name and price appear near each other
   const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+
+  // Strategy 0: Extract prices from embedded JSON (ld+json, __NEXT_DATA__, script data)
+  // This is the most reliable method for modern SPA e-commerce sites
+  const jsonPricePatterns = [
+    /"sellingPrice"\s*:\s*"?([\d,]+)"?/g,
+    /"offerPrice"\s*:\s*"?([\d,]+)"?/g,
+    /"finalPrice"\s*:\s*"?([\d,]+)"?/g,
+    /"special_price"\s*:\s*"?([\d,]+)"?/g,
+  ];
+  const jsonPrices: number[] = [];
+  for (const pattern of jsonPricePatterns) {
+    let jm;
+    while ((jm = pattern.exec(html)) !== null) {
+      const jp = cleanPrice(jm[1]);
+      if (jp && jp > 100 && jp < 10000000) jsonPrices.push(jp);
+    }
+  }
+  if (jsonPrices.length > 0) {
+    jsonPrices.sort((a, b) => a - b);
+    const price = jsonPrices[Math.floor(jsonPrices.length / 2)];
+    const nameMatch = html.match(/"productName"\s*:\s*"([^"]+)"/i) ??
+      html.match(/"name"\s*:\s*"([^"]+)"/i);
+    const title = nameMatch ? nameMatch[1] : (extractFirst(html, /<title[^>]*>([\s\S]*?)<\/title>/i) ?? query);
+    return {
+      name: title.replace(/\s+/g, " ").replace(/ - .*$| \| .*$/i, "").trim(),
+      price,
+      platform,
+      url,
+      scrapedAt: new Date().toISOString(),
+    };
+  }
 
   // Strategy 1: Find all ₹-prefixed prices and nearby text
   const priceBlocks: { name: string; price: number; relevance: number }[] = [];
@@ -472,14 +508,7 @@ function parseGenericSearch(html: string, query: string, platform: string, url: 
 async function searchFlipkartAPI(query: string): Promise<ScrapeResult> {
   const url = `https://www.flipkart.com/search?q=${encodeURIComponent(query)}`;
 
-  // Try Playwright browser first (most reliable for Flipkart)
-  try {
-    const { searchWithBrowser } = await import("./browser-scraper");
-    const result = await searchWithBrowser(query, "flipkart");
-    if (result.price && result.price > 0) return result;
-  } catch { /* fall through to API */ }
-
-  // Fallback: Flipkart internal API
+  // Strategy 1: Flipkart Rome API (most reliable, bypasses 403)
   try {
     const res = await fetch("https://2.rome.api.flipkart.com/api/4/page/fetch", {
       method: "POST",
@@ -487,42 +516,95 @@ async function searchFlipkartAPI(query: string): Promise<ScrapeResult> {
         "Content-Type": "application/json",
         "X-User-Agent": "Mozilla/5.0 FKUA/website/42/website/Desktop",
         "User-Agent": randomUA(),
+        "Accept": "*/*",
+        "Accept-Language": "en-IN,en;q=0.9",
+        "Origin": "https://www.flipkart.com",
+        "Referer": "https://www.flipkart.com/",
       },
       body: JSON.stringify({
         pageUri: `/search?q=${encodeURIComponent(query)}`,
         pageContext: { fetchSeoData: false },
         requestContext: { type: "BROWSE_PAGE" },
       }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
     });
 
     if (!res.ok) throw new Error(`Flipkart API ${res.status}`);
     const text = await res.text();
 
     const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-    const nameMatches = text.match(/"title":\{"value":"([^"]+)"/g) || [];
-    const priceMatches = text.match(/"finalPrice":\{"decimalValue":"(\d+)"/g) || [];
 
+    interface FlipkartProduct { name: string; price: number; productUrl: string }
+    const products: FlipkartProduct[] = [];
+
+    // Strategy A: Parse structured JSON (most reliable)
+    // Rome API returns RESPONSE.slots[] with widget.type === "PRODUCT_SUMMARY"
+    // Each has widget.data.products[].productInfo.value.{titles, pricing}
+    try {
+      const json = JSON.parse(text);
+      const slots = json?.RESPONSE?.slots ?? [];
+      for (const slot of slots) {
+        const widget = slot?.widget;
+        if (widget?.type !== "PRODUCT_SUMMARY") continue;
+        const prods = widget?.data?.products ?? [];
+        for (const p of prods) {
+          const val = p?.productInfo?.value;
+          if (!val) continue;
+          const title = val.titles?.title ?? val.titles?.newTitle ?? "";
+          const price = val.pricing?.finalPrice?.value ?? parseFloat(val.pricing?.finalPrice?.decimalValue ?? "0");
+          const productUrl = val.baseUrl ? `https://www.flipkart.com${val.baseUrl}` : "";
+          if (title && price > 0) {
+            products.push({ name: title, price: Math.round(price), productUrl });
+          }
+        }
+        if (products.length >= 15) break;
+      }
+    } catch { /* JSON parse failed, fall through to regex */ }
+
+    // Strategy B: Regex fallback if JSON parsing yielded no products
+    if (products.length === 0) {
+      // "titles" object contains "title":"Full Product Name" — avoids filter labels
+      const namePattern = /"titles":\{[^}]*"title":"([^"]+)"/g;
+      // finalPrice contains "value":<integer> — direct price without decimals
+      const pricePattern = /"finalPrice":\{[^}]*"value":(\d+)/g;
+
+      const names: string[] = [];
+      let m;
+      while ((m = namePattern.exec(text)) !== null) {
+        if (m[1].length > 5) names.push(m[1]);
+      }
+
+      const prices: number[] = [];
+      while ((m = pricePattern.exec(text)) !== null) {
+        const p = parseInt(m[1], 10);
+        if (p > 100) prices.push(p);
+      }
+
+      for (let i = 0; i < Math.min(names.length, prices.length, 15); i++) {
+        products.push({ name: names[i], price: prices[i], productUrl: "" });
+      }
+    }
+
+    // Find best matching product by query relevance
     let bestPrice: number | null = null;
     let bestName = query;
     let bestRelevance = 0;
 
-    const names = nameMatches.map(m => { const r = m.match(/"value":"([^"]+)"/); return r?.[1] ?? ""; }).filter(n => n.length > 5);
-    const prices = priceMatches.map(m => { const r = m.match(/"(\d+)"$/); return r ? parseInt(r[1]) : 0; }).filter(p => p > 500);
-
-    for (let i = 0; i < Math.min(names.length, prices.length, 10); i++) {
-      const nameLower = names[i].toLowerCase();
+    for (const p of products) {
+      const nameLower = p.name.toLowerCase();
       const matchCount = queryWords.filter(w => nameLower.includes(w)).length;
       const relevance = matchCount / queryWords.length;
-      if (relevance > bestRelevance && prices[i] > 500) {
+      if (relevance > bestRelevance && p.price > 100) {
         bestRelevance = relevance;
-        bestPrice = prices[i];
-        bestName = names[i];
+        bestPrice = p.price;
+        bestName = p.name;
       }
     }
 
-    if (!bestPrice && prices.length > 0) {
-      bestPrice = prices[0];
-      if (names.length > 0) bestName = names[0];
+    // If no name matched well, just pick the first product
+    if (!bestPrice && products.length > 0) {
+      bestPrice = products[0].price;
+      bestName = products[0].name;
     }
 
     return {
@@ -533,25 +615,73 @@ async function searchFlipkartAPI(query: string): Promise<ScrapeResult> {
       scrapedAt: new Date().toISOString(),
       error: bestPrice ? undefined : "No price in Flipkart response",
     };
-  } catch {
-    return { name: query, price: null, platform: "Flipkart", url, scrapedAt: new Date().toISOString(), error: "Flipkart search failed" };
-  }
+  } catch { /* fall through to browser */ }
+
+  // Strategy 2: Playwright browser (handles JS rendering)
+  try {
+    const { searchWithBrowser } = await import("./browser-scraper");
+    const result = await searchWithBrowser(query, "flipkart");
+    if (result.price && result.price > 0) return result;
+  } catch { /* fall through */ }
+
+  return { name: query, price: null, platform: "Flipkart", url, scrapedAt: new Date().toISOString(), error: "Flipkart search failed - all strategies exhausted" };
 }
 
 // --- Croma API search ---
 
 async function searchCromaAPI(query: string): Promise<ScrapeResult> {
-  // Try multiple Croma URL patterns
-  const urls = [
+  const searchUrl = `https://www.croma.com/search/?text=${encodeURIComponent(query)}`;
+
+  // Strategy 1: Browser scraper (most reliable - Croma uses Akamai WAF)
+  try {
+    const { searchWithBrowser } = await import("./browser-scraper");
+    const result = await searchWithBrowser(query, "croma");
+    if (result.price && result.price > 0) return result;
+  } catch { /* fall through */ }
+
+  // Strategy 2: Try Croma's product search REST API
+  try {
+    const apiUrl = `https://api.croma.com/productsearch/v2/search?doubleEncoded=false&query=${encodeURIComponent(query)}&sortBy=relevance&pageIndex=0&pageSize=5`;
+    const res = await fetch(apiUrl, {
+      headers: {
+        "User-Agent": randomUA(),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Origin": "https://www.croma.com",
+        "Referer": "https://www.croma.com/",
+      },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const products = data.products || data.searchresult?.products || [];
+      if (products.length > 0) {
+        const p = products[0];
+        const price = p.sellingPrice ?? p.price?.value ?? p.offerPrice ?? p.mrp ?? null;
+        const name = p.name || p.productName || p.heading || query;
+        const productUrl = p.url ? `https://www.croma.com${p.url}` : searchUrl;
+        if (price && price > 100) {
+          return { name, price, platform: "Croma", url: productUrl, scrapedAt: new Date().toISOString() };
+        }
+      }
+    }
+  } catch { /* fall through */ }
+
+  // Strategy 3: HTML scraping with JSON extraction from script tags
+  const htmlUrls = [
     `https://www.croma.com/search/?text=${encodeURIComponent(query)}`,
     `https://www.croma.com/searchB?q=${encodeURIComponent(query)}`,
   ];
 
-  for (const url of urls) {
+  for (const url of htmlUrls) {
     try {
       const html = await fetchHtml(url, "croma");
-      // Extract prices with multiple patterns
+      if (html.length < 1000) continue; // Skip WAF block pages
+
       const priceMatches: number[] = [];
+
+      // Extract from ₹ symbols in HTML
       const priceRegex = /₹\s*([\d,]+)/g;
       let m;
       while ((m = priceRegex.exec(html)) !== null) {
@@ -559,53 +689,99 @@ async function searchCromaAPI(query: string): Promise<ScrapeResult> {
         if (p && p > 500 && p < 10000000) priceMatches.push(p);
       }
 
-      // Also try data attributes and JSON
-      const jsonPriceMatch = html.match(/"price":\s*"?([\d,]+)"?/);
-      if (jsonPriceMatch) {
-        const jp = cleanPrice(jsonPriceMatch[1]);
-        if (jp && jp > 500) priceMatches.push(jp);
+      // Extract from JSON in script tags
+      const jsonPricePatterns = [
+        /"sellingPrice"\s*:\s*"?([\d,]+)"?/g,
+        /"offerPrice"\s*:\s*"?([\d,]+)"?/g,
+        /"price"\s*:\s*"?([\d,]+)"?/g,
+      ];
+      for (const pattern of jsonPricePatterns) {
+        let jm;
+        while ((jm = pattern.exec(html)) !== null) {
+          const jp = cleanPrice(jm[1]);
+          if (jp && jp > 500 && jp < 10000000) priceMatches.push(jp);
+        }
       }
 
+      const nameMatch = html.match(/"productName"\s*:\s*"([^"]+)"/i) ??
+        html.match(/"name"\s*:\s*"([^"]+)"/i) ??
+        html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+
       if (priceMatches.length > 0) {
-        // Get median price (most reliable)
         priceMatches.sort((a, b) => a - b);
         const price = priceMatches[Math.floor(priceMatches.length / 2)];
-
-        const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-        const name = titleMatch ? titleMatch[1].replace(/ - Croma.*| \| .*| Buy .*/gi, "").trim() : query;
-
+        const name = nameMatch ? nameMatch[1].replace(/ - Croma.*| \| .*| Buy .*/gi, "").trim() : query;
         return { name, price, platform: "Croma", url, scrapedAt: new Date().toISOString() };
       }
     } catch { continue; }
   }
 
-  // Browser fallback
-  try {
-    const { searchWithBrowser } = await import("./browser-scraper");
-    return await searchWithBrowser(query, "croma");
-  } catch {
-    return { name: query, price: null, platform: "Croma", url: urls[0], scrapedAt: new Date().toISOString(), error: "Croma: no prices found" };
-  }
+  return { name: query, price: null, platform: "Croma", url: searchUrl, scrapedAt: new Date().toISOString(), error: "Croma blocked by WAF - browser scraper unavailable" };
 }
 
 // --- Vijay Sales search ---
 
 async function searchVijaySales(query: string): Promise<ScrapeResult> {
-  // Try the correct Vijay Sales search URL
+  const fallbackUrl = `https://www.vijaysales.com/search/-/results?q=${encodeURIComponent(query)}&category=all`;
+
+  // Strategy 1: Vijay Sales search API (returns JSON)
+  try {
+    const apiUrl = `https://www.vijaysales.com/rest/V1/search/?searchCriteria[filter_groups][0][filters][0][field]=search_term&searchCriteria[filter_groups][0][filters][0][value]=${encodeURIComponent(query)}&searchCriteria[pageSize]=5`;
+    const res = await fetch(apiUrl, {
+      headers: {
+        "User-Agent": randomUA(),
+        "Accept": "application/json",
+        "Referer": "https://www.vijaysales.com/",
+      },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const items = data.items || [];
+      if (items.length > 0) {
+        const item = items[0];
+        const price = item.price ?? item.special_price ?? item.final_price ?? null;
+        if (price && price > 100) {
+          return {
+            name: item.name || query,
+            price,
+            platform: "Vijay Sales",
+            url: item.url || fallbackUrl,
+            scrapedAt: new Date().toISOString(),
+          };
+        }
+      }
+    }
+  } catch { /* fall through */ }
+
+  // Strategy 2: Try multiple HTML URL patterns (including search-listing which has product cards)
   const urls = [
-    `https://www.vijaysales.com/search?q=${encodeURIComponent(query)}`,
+    `https://www.vijaysales.com/search-listing?q=${encodeURIComponent(query)}`,
+    `https://www.vijaysales.com/search/-/results?q=${encodeURIComponent(query)}&category=all`,
     `https://www.vijaysales.com/catalogsearch/result?q=${encodeURIComponent(query)}`,
-    `https://www.vijaysales.com/search/${encodeURIComponent(query.replace(/\s+/g, "+"))}`,
   ];
 
   for (const url of urls) {
     try {
       const html = await fetchHtml(url, "vijaysales");
+      if (html.length < 1000) continue; // Skip error pages
+
+      // Vijay Sales loads real search results via Unbxd JS (client-side only)
+      // The bestSelling section is a STATIC template with dummy data - skip it
+      // Only extract from actual product data (JSON in script tags, ld+json, etc.)
+      // Remove the static bestSelling section before parsing
+      const cleanedHtml = html.replace(/bestSelling__[\s\S]*?(?=<\/section|<footer)/gi, "");
+
       const priceRaw =
-        extractFirst(html, /₹\s*([\d,]+)/i) ??
-        extractFirst(html, /<span[^>]*class="[^"]*price[^"]*"[^>]*>([^<]+)<\/span>/i) ??
-        extractFirst(html, /"price":\s*"?([\d,]+)"?/i);
-      const nameRaw = extractFirst(html, /<title[^>]*>([\s\S]*?)<\/title>/i) ?? query;
+        extractFirst(cleanedHtml, /"sellingPrice"\s*:\s*"?([\d,]+)"?/i) ??
+        extractFirst(cleanedHtml, /"offerPrice"\s*:\s*"?([\d,]+)"?/i) ??
+        extractFirst(cleanedHtml, /"price"\s*:\s*"?([\d,]+)"?/i) ??
+        extractFirst(cleanedHtml, /<span[^>]*class="[^"]*price[^"]*"[^>]*>([^<]+)<\/span>/i);
+
+      const nameRaw =
+        extractFirst(cleanedHtml, /"productName"\s*:\s*"([^"]+)"/i) ??
+        extractFirst(cleanedHtml, /"name"\s*:\s*"([^"]+)"/i) ??
+        query;
 
       if (priceRaw) {
         const price = cleanPrice(priceRaw);
@@ -622,20 +798,29 @@ async function searchVijaySales(query: string): Promise<ScrapeResult> {
     } catch { continue; }
   }
 
-  // Fallback to browser
+  // Strategy 3: Browser fallback
   try {
     const { searchWithBrowser } = await import("./browser-scraper");
     return await searchWithBrowser(query, "vijaysales");
   } catch {
-    return { name: query, price: null, platform: "Vijay Sales", url: urls[0], scrapedAt: new Date().toISOString(), error: "Vijay Sales scraping failed" };
+    return { name: query, price: null, platform: "Vijay Sales", url: fallbackUrl, scrapedAt: new Date().toISOString(), error: "Vijay Sales scraping failed" };
   }
 }
 
 // --- AJIO API search ---
 
 async function searchAjioAPI(query: string): Promise<ScrapeResult> {
+  const fallbackUrl = `https://www.ajio.com/search/?text=${encodeURIComponent(query)}`;
+
+  // Strategy 1: Browser scraper (most reliable - AJIO uses Akamai WAF)
   try {
-    // AJIO has a JSON API
+    const { searchWithBrowser } = await import("./browser-scraper");
+    const result = await searchWithBrowser(query, "ajio");
+    if (result.price && result.price > 0) return result;
+  } catch { /* fall through */ }
+
+  // Strategy 2: Try AJIO JSON API (may be blocked by Akamai)
+  try {
     const url = `https://www.ajio.com/api/search?fields=SITE&currentPage=0&pageSize=5&format=json&query=${encodeURIComponent(query)}`;
     const res = await fetch(url, {
       headers: {
@@ -643,6 +828,7 @@ async function searchAjioAPI(query: string): Promise<ScrapeResult> {
         "Accept": "application/json",
         "Referer": "https://www.ajio.com/",
       },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
     });
 
     if (res.ok) {
@@ -661,53 +847,286 @@ async function searchAjioAPI(query: string): Promise<ScrapeResult> {
     }
   } catch { /* fall through */ }
 
-  // Fallback to browser
+  // Strategy 3: Try HTML page and extract from embedded JSON
+  try {
+    const html = await fetchHtml(fallbackUrl, "ajio");
+    if (html.length > 1000) {
+      const priceRaw =
+        extractFirst(html, /"sellingPrice"\s*:\s*"?([\d,]+)"?/i) ??
+        extractFirst(html, /"offerPrice"\s*:\s*"?([\d,]+)"?/i) ??
+        extractFirst(html, /₹\s*([\d,]+)/i);
+      const nameRaw =
+        extractFirst(html, /"productName"\s*:\s*"([^"]+)"/i) ??
+        extractFirst(html, /<title[^>]*>([\s\S]*?)<\/title>/i) ??
+        query;
+      if (priceRaw) {
+        const price = cleanPrice(priceRaw);
+        if (price && price > 100) {
+          return { name: nameRaw.replace(/\s+/g, " ").trim(), price, platform: "AJIO", url: fallbackUrl, scrapedAt: new Date().toISOString() };
+        }
+      }
+    }
+  } catch { /* fall through */ }
+
+  return { name: query, price: null, platform: "AJIO", url: fallbackUrl, scrapedAt: new Date().toISOString(), error: "AJIO blocked by WAF - browser scraper unavailable" };
+}
+
+// --- Snapdeal product listing API ---
+
+async function searchSnapdealAPI(query: string): Promise<ScrapeResult> {
+  const searchUrl = `https://www.snapdeal.com/search?keyword=${encodeURIComponent(query)}`;
+  const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+
+  // Strategy 1: Snapdeal's AJAX product listing API (returns HTML with product cards)
+  try {
+    const apiUrl = `https://www.snapdeal.com/acors/json/product/get/search/0/20/10?keyword=${encodeURIComponent(query)}&sort=rlvncy&lang=en`;
+    const html = await fetchHtml(apiUrl, "snapdeal");
+
+    // Extract product titles and prices from the listing HTML
+    const titleRegex = /class="product-title"[^>]*>([^<]+)/g;
+    const priceRegex = /Rs\.\s*([\d,]+)/g;
+
+    const titles: string[] = [];
+    const prices: number[] = [];
+    let m;
+
+    while ((m = titleRegex.exec(html)) !== null) {
+      titles.push(m[1].trim());
+    }
+    while ((m = priceRegex.exec(html)) !== null) {
+      const p = cleanPrice(m[1]);
+      if (p && p > 100) prices.push(p);
+    }
+
+    // Find the most relevant product
+    let bestName = query;
+    let bestPrice: number | null = null;
+    let bestRelevance = 0;
+
+    for (let i = 0; i < Math.min(titles.length, prices.length, 10); i++) {
+      const nameLower = titles[i].toLowerCase();
+      const matchCount = queryWords.filter(w => nameLower.includes(w)).length;
+      const relevance = queryWords.length > 0 ? matchCount / queryWords.length : 0;
+      if (relevance > bestRelevance) {
+        bestRelevance = relevance;
+        bestPrice = prices[i];
+        bestName = titles[i];
+      }
+    }
+
+    // If no good match, pick first product with reasonable price
+    if (!bestPrice && prices.length > 0 && titles.length > 0) {
+      bestPrice = prices[0];
+      bestName = titles[0];
+    }
+
+    if (bestPrice) {
+      return {
+        name: bestName,
+        price: bestPrice,
+        platform: "Snapdeal",
+        url: searchUrl,
+        scrapedAt: new Date().toISOString(),
+      };
+    }
+  } catch { /* fall through */ }
+
+  // Strategy 2: Direct search page HTML
+  try {
+    const html = await fetchHtml(searchUrl, "snapdeal");
+    return parseGenericSearch(html, query, "Snapdeal", searchUrl);
+  } catch { /* fall through */ }
+
+  return { name: query, price: null, platform: "Snapdeal", url: searchUrl, scrapedAt: new Date().toISOString(), error: "Snapdeal search failed" };
+}
+
+// --- Tata CLiQ search ---
+
+async function searchTataCliq(query: string): Promise<ScrapeResult> {
+  const searchUrl = `https://www.tatacliq.com/search/?searchCategory=all&text=${encodeURIComponent(query)}`;
+
+  // Strategy 1: Tata CLiQ marketplace API
+  try {
+    const apiUrl = `https://www.tatacliq.com/marketplacewebservices/v2/mpl/products/searchProducts?searchCategory=all&text=${encodeURIComponent(query)}&isKeywordRedirect=true&isKeywordRedirectEnabled=true&page=0&pageSize=5&isTextSearch=true&channel=WEB`;
+    const res = await fetch(apiUrl, {
+      headers: {
+        "User-Agent": randomUA(),
+        "Accept": "application/json",
+        "Origin": "https://www.tatacliq.com",
+        "Referer": searchUrl,
+      },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data.status !== "Failure") {
+        const products = data.searchresult || [];
+        if (products.length > 0) {
+          const p = products[0];
+          const price = p.winningSellerPrice?.value ?? p.mrpPrice?.value ?? null;
+          const name = p.productname || p.brand || query;
+          if (price && price > 100) {
+            const productUrl = p.webURL ? `https://www.tatacliq.com${p.webURL}` : searchUrl;
+            return { name, price, platform: "Tata CLiQ", url: productUrl, scrapedAt: new Date().toISOString() };
+          }
+        }
+      }
+    }
+  } catch { /* fall through */ }
+
+  // Strategy 2: Browser scraper (Tata CLiQ is a full SPA)
   try {
     const { searchWithBrowser } = await import("./browser-scraper");
-    return await searchWithBrowser(query, "ajio");
-  } catch {
-    return { name: query, price: null, platform: "AJIO", url: `https://www.ajio.com/search/?text=${encodeURIComponent(query)}`, scrapedAt: new Date().toISOString(), error: "AJIO scraping failed" };
+    const result = await searchWithBrowser(query, "tatacliq");
+    if (result.price && result.price > 0) return result;
+  } catch { /* fall through */ }
+
+  // Strategy 3: Parse the HTML shell for any embedded data
+  try {
+    const html = await fetchHtml(searchUrl, "tatacliq");
+    // Check for __NEXT_DATA__ or any embedded JSON
+    const nextDataMatch = html.match(/__NEXT_DATA__[^>]*>([\s\S]*?)<\/script>/);
+    if (nextDataMatch) {
+      const priceMatch = nextDataMatch[1].match(/"sellingPrice"\s*:\s*"?([\d,]+)"?/);
+      const nameMatch = nextDataMatch[1].match(/"productName"\s*:\s*"([^"]+)"/);
+      if (priceMatch) {
+        const price = cleanPrice(priceMatch[1]);
+        if (price && price > 100) {
+          return {
+            name: nameMatch ? nameMatch[1] : query,
+            price,
+            platform: "Tata CLiQ",
+            url: searchUrl,
+            scrapedAt: new Date().toISOString(),
+          };
+        }
+      }
+    }
+    // Try generic extraction from any embedded JSON
+    return parseGenericSearch(html, query, "Tata CLiQ", searchUrl);
+  } catch { /* fall through */ }
+
+  return { name: query, price: null, platform: "Tata CLiQ", url: searchUrl, scrapedAt: new Date().toISOString(), error: "Tata CLiQ: SPA requires browser rendering" };
+}
+
+// --- Smart platform selection based on product category ---
+
+const ELECTRONICS_KEYWORDS = [
+  "ac", "air conditioner", "tv", "television", "laptop", "phone", "mobile", "tablet",
+  "iphone", "ipad", "macbook", "samsung galaxy", "oneplus", "pixel", "redmi", "realme", "vivo", "oppo", "nothing phone",
+  "refrigerator", "fridge", "washing machine", "microwave", "oven", "mixer", "grinder",
+  "speaker", "headphone", "earphone", "earbud", "charger", "power bank", "camera",
+  "monitor", "printer", "router", "smartwatch", "watch", "fan", "cooler", "heater",
+  "iron", "vacuum", "purifier", "dishwasher", "led", "oled", "qled", "inverter",
+  "stabilizer", "ups", "hard disk", "ssd", "ram", "gpu", "processor", "keyboard", "mouse",
+  "gaming", "console", "playstation", "xbox", "nintendo", "projector", "drone",
+  "trimmer", "shaver", "dryer", "straightener", "toaster", "kettle", "induction",
+  "geyser", "water heater", "chimney", "hob", "stove",
+  "256gb", "128gb", "512gb", "1tb", "ultra", "pro max",
+];
+const FASHION_KEYWORDS = [
+  "shirt", "tshirt", "t-shirt", "jeans", "pant", "trouser", "dress", "kurta", "saree",
+  "lehenga", "jacket", "hoodie", "sweater", "shorts", "skirt", "suit", "blazer",
+  "shoes", "sneakers", "sandals", "heels", "boots", "slipper", "flip flop",
+  "bag", "handbag", "backpack", "wallet", "belt", "sunglasses", "watch",
+  "ethnic", "western", "formal", "casual", "sportswear", "activewear",
+  "underwear", "lingerie", "socks", "cap", "hat", "scarf", "stole",
+];
+const BEAUTY_KEYWORDS = [
+  "cream", "serum", "moisturizer", "sunscreen", "lotion", "shampoo", "conditioner",
+  "lipstick", "foundation", "mascara", "eyeliner", "perfume", "fragrance", "deodorant",
+  "face wash", "cleanser", "toner", "makeup", "nail polish", "hair oil", "body wash",
+  "skincare", "haircare", "beauty", "cosmetic", "kajal",
+];
+
+const ELECTRONICS_PLATFORMS: PlatformKey[] = ["amazon", "flipkart", "croma", "snapdeal", "tatacliq", "vijaysales"];
+const FASHION_PLATFORMS: PlatformKey[] = ["amazon", "flipkart", "myntra", "ajio", "snapdeal", "tatacliq", "nykaa"];
+const BEAUTY_PLATFORMS: PlatformKey[] = ["amazon", "flipkart", "myntra", "ajio", "nykaa"];
+const ALL_PLATFORMS: PlatformKey[] = ["amazon", "flipkart", "croma", "myntra", "ajio", "snapdeal", "tatacliq", "nykaa", "vijaysales"];
+
+function detectCategory(query: string): "electronics" | "fashion" | "beauty" | "general" {
+  const q = query.toLowerCase();
+  const elecScore = ELECTRONICS_KEYWORDS.filter(kw => q.includes(kw)).length;
+  const fashScore = FASHION_KEYWORDS.filter(kw => q.includes(kw)).length;
+  const beautyScore = BEAUTY_KEYWORDS.filter(kw => q.includes(kw)).length;
+
+  if (elecScore > 0 && elecScore >= fashScore && elecScore >= beautyScore) return "electronics";
+  if (fashScore > 0 && fashScore >= elecScore && fashScore >= beautyScore) return "fashion";
+  if (beautyScore > 0 && beautyScore >= elecScore && beautyScore >= fashScore) return "beauty";
+  return "general";
+}
+
+function getRelevantPlatforms(query: string, requestedPlatforms?: string[]): PlatformKey[] {
+  // If user explicitly specified platforms, respect that
+  if (requestedPlatforms && requestedPlatforms.length > 0 && requestedPlatforms.length < ALL_PLATFORMS.length) {
+    return requestedPlatforms.map(p => p.toLowerCase().trim() as PlatformKey).filter(p => p in SEARCH_URLS);
+  }
+
+  const category = detectCategory(query);
+  switch (category) {
+    case "electronics": return ELECTRONICS_PLATFORMS;
+    case "fashion": return FASHION_PLATFORMS;
+    case "beauty": return BEAUTY_PLATFORMS;
+    default: return ALL_PLATFORMS;
   }
 }
 
 /**
  * Search for a product across multiple platforms.
- * Uses API-based search for blocked sites, HTML scraping for others.
+ * Uses smart platform selection + API-based search for blocked sites.
  */
 export async function searchProduct(
   name: string,
-  platforms: string[] = ["amazon", "flipkart", "croma", "myntra", "ajio", "snapdeal", "tatacliq", "nykaa", "vijaysales"]
+  platforms?: string[]
 ): Promise<ScrapeResult[]> {
-  const validPlatforms = platforms
-    .map((p) => p.toLowerCase().trim() as PlatformKey)
-    .filter((p) => p in SEARCH_URLS);
+  const validPlatforms = getRelevantPlatforms(name, platforms);
 
   if (validPlatforms.length === 0) {
     return [{ name, price: null, platform: "none", url: "", scrapedAt: new Date().toISOString(), error: "No valid platforms" }];
   }
 
-  const tasks = validPlatforms.map(async (platform): Promise<ScrapeResult> => {
-    // Use API-based search for sites that block HTML scraping
-    if (platform === "flipkart") return searchFlipkartAPI(name);
-    if (platform === "croma") return searchCromaAPI(name);
-    if (platform === "vijaysales") return searchVijaySales(name);
-    if (platform === "ajio") return searchAjioAPI(name);
+  // Wrap each platform search with a 20-second timeout to prevent hanging
+  const PLATFORM_TIMEOUT = 20000;
+  function withTimeout(promise: Promise<ScrapeResult>, platform: string): Promise<ScrapeResult> {
+    return Promise.race([
+      promise,
+      new Promise<ScrapeResult>((resolve) =>
+        setTimeout(() => resolve({
+          name, price: null, platform, url: "",
+          scrapedAt: new Date().toISOString(),
+          error: `Timeout: ${platform} took longer than ${PLATFORM_TIMEOUT / 1000}s`,
+        }), PLATFORM_TIMEOUT)
+      ),
+    ]);
+  }
+
+  const tasks = validPlatforms.map((platform): Promise<ScrapeResult> => {
+    // Use dedicated search functions for each platform
+    if (platform === "flipkart") return withTimeout(searchFlipkartAPI(name), "Flipkart");
+    if (platform === "croma") return withTimeout(searchCromaAPI(name), "Croma");
+    if (platform === "vijaysales") return withTimeout(searchVijaySales(name), "Vijay Sales");
+    if (platform === "ajio") return withTimeout(searchAjioAPI(name), "AJIO");
+    if (platform === "snapdeal") return withTimeout(searchSnapdealAPI(name), "Snapdeal");
+    if (platform === "tatacliq") return withTimeout(searchTataCliq(name), "Tata CLiQ");
 
     const searchUrl = SEARCH_URLS[platform](name);
-    try {
-      const html = await fetchHtml(searchUrl, platform);
+    return withTimeout((async () => {
+      try {
+        const html = await fetchHtml(searchUrl, platform);
 
-      if (platform === "amazon") return parseAmazonSearch(html, name);
+        if (platform === "amazon") return parseAmazonSearch(html, name);
 
-      const displayNames: Record<string, string> = {
-        croma: "Croma", myntra: "Myntra", ajio: "AJIO", snapdeal: "Snapdeal",
-        tatacliq: "Tata CLiQ", nykaa: "Nykaa", vijaysales: "Vijay Sales",
-      };
-      return parseGenericSearch(html, name, displayNames[platform] || platform, searchUrl);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { name, price: null, platform, url: searchUrl, scrapedAt: new Date().toISOString(), error: `Search failed: ${message}` };
-    }
+        const displayNames: Record<string, string> = {
+          croma: "Croma", myntra: "Myntra", ajio: "AJIO", snapdeal: "Snapdeal",
+          tatacliq: "Tata CLiQ", nykaa: "Nykaa", vijaysales: "Vijay Sales",
+        };
+        return parseGenericSearch(html, name, displayNames[platform] || platform, searchUrl);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { name, price: null, platform, url: searchUrl, scrapedAt: new Date().toISOString(), error: `Search failed: ${message}` };
+      }
+    })(), platform);
   });
 
   return Promise.all(tasks);

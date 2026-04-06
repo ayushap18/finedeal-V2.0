@@ -4,6 +4,56 @@ import { corsJson, corsError, handleOptions } from "@/lib/api-helpers";
 import { scrapeProduct, searchProduct, searchViaGoogle, ScrapeResult } from "@/lib/scraper";
 import { generateDealSummary, analyzeScrapedPrices } from "@/lib/ai";
 
+/**
+ * Clean a raw product title into a short, searchable query.
+ * E.g. "iPhone 17 Pro 256 GB: 15.93 cm (6.3″) Display with Promotion up to 120Hz, A19 Pr"
+ *   → "iPhone 17 Pro 256GB"
+ */
+function cleanSearchQuery(raw: string): string {
+  let q = raw;
+
+  // Remove everything after common separators that start spec/promo text
+  q = q.split(/[:\|–—]/).slice(0, 1).join("").trim();
+
+  // Remove parenthetical content like (6.3″), (Black), (2026)
+  q = q.replace(/\(([^)]*)\)/g, (_, inner) => {
+    // Keep color/variant if short
+    if (inner.length <= 12 && !/cm|inch|display|Hz/i.test(inner)) return `(${inner})`;
+    return "";
+  });
+
+  // Remove common spec phrases
+  q = q.replace(/\b\d+(\.\d+)?\s*(cm|inch|inches|mm)\b/gi, "");
+  q = q.replace(/\b\d+\s*Hz\b/gi, "");
+  q = q.replace(/\bdisplay\b/gi, "");
+  q = q.replace(/\bwith\s+promotion\b/gi, "");
+  q = q.replace(/\bup\s+to\b/gi, "");
+  q = q.replace(/\b(launched|latest|new|best|buy)\b/gi, "");
+  q = q.replace(/\b[A-Z]\d{1,2}\s*(Pro|Max|Ultra|Chip)?\b/g, (m) => {
+    // Keep if it looks like a model (e.g. "S24", "A16") but remove processor names like "A19 Pr"
+    if (/^[A-Z]\d{1,2}\s*(Pr|Pro\s*chip|Bionic|Fusion)/i.test(m)) return "";
+    return m;
+  });
+
+  // Normalize storage: "256 GB" → "256GB"
+  q = q.replace(/(\d+)\s*GB/gi, "$1GB");
+  q = q.replace(/(\d+)\s*TB/gi, "$1TB");
+
+  // Collapse whitespace
+  q = q.replace(/\s{2,}/g, " ").trim();
+
+  // If still too long, take first 6 words (usually brand + model + variant)
+  const words = q.split(/\s+/);
+  if (words.length > 6) {
+    q = words.slice(0, 6).join(" ");
+  }
+
+  // Final trim of trailing punctuation
+  q = q.replace(/[,;.\s]+$/, "").trim();
+
+  return q || raw.substring(0, 40);
+}
+
 let scraperStatus: {
   running: boolean;
   started_at: string | null;
@@ -41,7 +91,13 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   try {
     if (scraperStatus.running) {
-      return corsError("Scraper is already running", 409);
+      // Auto-reset if stuck for more than 2 minutes
+      const startedAt = scraperStatus.started_at ? new Date(scraperStatus.started_at).getTime() : 0;
+      if (Date.now() - startedAt > 120000) {
+        scraperStatus.running = false;
+      } else {
+        return corsError("Scraper is already running", 409);
+      }
     }
 
     const body = await req.json().catch(() => ({}));
@@ -65,11 +121,14 @@ export async function POST(req: NextRequest) {
 
     const startTime = Date.now();
     let results: ScrapeResult[];
+    // Clean the query: strip specs, promo text, display sizes from raw product titles
+    const cleanedQuery = query ? cleanSearchQuery(query) : "";
+    if (query) console.log(`[Scraper] Raw query: "${query}" → Cleaned: "${cleanedQuery}"`);
 
     if (url) {
       results = [await scrapeProduct(url)];
     } else {
-      results = await searchProduct(query!, platforms);
+      results = await searchProduct(cleanedQuery, platforms);
     }
 
     // === PHASE 1: Filter out ₹0 and obviously wrong prices ===
@@ -81,22 +140,53 @@ export async function POST(req: NextRequest) {
     }
 
     // === PHASE 1.5: Price variance filter ===
-    // If multiple results exist, reject prices that are suspiciously low (>80% below median)
+    // Reject prices that are suspiciously far from the cluster of similar prices
     const validPrices = results.filter(r => r.price && r.price > 0).map(r => r.price!);
-    if (validPrices.length >= 2) {
+    if (validPrices.length >= 3) {
       validPrices.sort((a, b) => a - b);
       const median = validPrices[Math.floor(validPrices.length / 2)];
       for (let i = 0; i < results.length; i++) {
         const r = results[i];
-        if (r.price && r.price < median * 0.2) {
-          results[i] = { ...r, price: null, error: `Suspicious price ₹${r.price} (80%+ below median ₹${median})` };
+        if (r.price) {
+          // Reject if price is >60% below median (likely wrong product/accessory)
+          if (r.price < median * 0.4) {
+            results[i] = { ...r, price: null, error: `Suspicious price ₹${r.price} (60%+ below median ₹${median}) - likely wrong product` };
+          }
+          // Reject if price is >300% above median (likely wrong product/bundle)
+          else if (r.price > median * 4) {
+            results[i] = { ...r, price: null, error: `Suspicious price ₹${r.price} (300%+ above median ₹${median}) - likely wrong product` };
+          }
+        }
+      }
+    }
+
+    // === PHASE 1.7: Basic product name relevance check ===
+    // Filter out results whose product name has zero overlap with the search query
+    if (cleanedQuery) {
+      const queryWords = cleanedQuery.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+      const genericPageTitles = ["search results", "buy products", "online shopping", "best price", "buy online", "search listing"];
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        if (!r.price || !r.name) continue;
+        const nameLower = r.name.toLowerCase();
+
+        // Reject generic page titles (not actual product names)
+        if (genericPageTitles.some(t => nameLower.includes(t)) && nameLower.length < 80) {
+          results[i] = { ...r, price: null, error: `Rejected: generic page title, not a product ("${r.name.substring(0, 50)}")` };
+          continue;
+        }
+
+        // Check if at least one significant query word appears in the product name
+        const matchCount = queryWords.filter(w => nameLower.includes(w)).length;
+        if (queryWords.length >= 2 && matchCount === 0) {
+          results[i] = { ...r, price: null, error: `Rejected: product name "${r.name.substring(0, 50)}" has no match with query "${cleanedQuery}"` };
         }
       }
     }
 
     // === PHASE 2: AI Validation with Groq (fast) ===
     // Validate that returned products actually match the search query
-    if (query && results.some(r => r.price)) {
+    if (cleanedQuery && results.some(r => r.price)) {
       try {
         const resultsForValidation = results
           .filter(r => r.price)
@@ -121,7 +211,14 @@ export async function POST(req: NextRequest) {
               model: "llama-3.3-70b-versatile",
               messages: [{
                 role: "user",
-                content: `I searched for "${query}" and got these results from different shopping sites. For each result, tell me if the product name and price are RELEVANT to my search query. A result is relevant if the product name is related to what I searched for.
+                content: `I searched for "${cleanedQuery}" on Indian e-commerce sites. For each result, determine if it is the EXACT SAME type of product I searched for. Be VERY STRICT:
+
+RULES:
+- The product must be the SAME category and type (e.g. if I searched for "AC" or "air conditioner", an AC cover/bag/remote is NOT relevant)
+- Accessories, covers, cases, bags, and add-ons for the product are NOT relevant
+- Generic store pages like "Search Results", "Buy Products Online" are NOT relevant
+- The price must be reasonable for the product (e.g. ₹419 for an AC is obviously wrong)
+- If the product name doesn't clearly mention the searched item, mark as NOT relevant
 
 Results:
 ${resultsForValidation.map((r, i) => `${i + 1}. ${r.platform}: "${r.name}" at ₹${r.price?.toLocaleString("en-IN")}`).join("\n")}
@@ -200,7 +297,7 @@ Respond with ONLY a JSON object (no markdown):
         // Run both Gemini calls in parallel
         const [summaryResult, analysisResult] = await Promise.allSettled([
           generateDealSummary(productsForAI),
-          query ? analyzeScrapedPrices(query, productsForAI) : Promise.resolve(null),
+          cleanedQuery ? analyzeScrapedPrices(cleanedQuery, productsForAI) : Promise.resolve(null),
         ]);
 
         if (summaryResult.status === "fulfilled") {

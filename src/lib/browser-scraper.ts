@@ -1,15 +1,21 @@
 import { ScrapeResult } from "./scraper";
 
+// Track playwright availability - reset periodically
 let playwrightAvailable = true;
+let lastPlaywrightCheck = 0;
+const PLAYWRIGHT_RETRY_INTERVAL = 300000; // 5 minutes
 
 /**
  * Scrape a site using a headless browser (Playwright Chromium).
  * Falls back gracefully if Playwright is not available.
  */
 export async function scrapeWithBrowser(url: string, platform: string): Promise<ScrapeResult> {
-  if (!playwrightAvailable) {
-    return { name: "Unknown", price: null, platform, url, scrapedAt: new Date().toISOString(), error: "Browser scraping not available" };
+  // Re-check playwright availability periodically (browser may be installed later)
+  if (!playwrightAvailable && Date.now() - lastPlaywrightCheck < PLAYWRIGHT_RETRY_INTERVAL) {
+    return { name: "Unknown", price: null, platform, url, scrapedAt: new Date().toISOString(), error: "Browser scraping not available - run: npx playwright install chromium" };
   }
+  // Reset flag to retry
+  if (!playwrightAvailable) playwrightAvailable = true;
 
   try {
     const { chromium } = await import("playwright");
@@ -46,8 +52,13 @@ export async function scrapeWithBrowser(url: string, platform: string): Promise<
         // AJIO
         "span.prod-sp", "span.prod-discnt-price",
         // Vijay Sales
-        "span.product-price", "span.price",
-        // Generic
+        "span.product-price", ".price-tag__amount", "[class*='productPriceAmount']",
+        // Tata CLiQ
+        "[class*='ProductPrice']", "[class*='product-price']", "[class*='offer-price']",
+        // Snapdeal
+        "span.payBlkBig", ".lfloatlt .product-price",
+        // Generic (last resort)
+        "span.price", "[class*='selling-price']", "[class*='sellingPrice']",
         "[class*='price']", "[class*='Price']", "[data-price]",
       ];
 
@@ -124,9 +135,10 @@ export async function scrapeWithBrowser(url: string, platform: string): Promise<
       throw err;
     }
   } catch (err) {
-    if (String(err).includes("Cannot find module") || String(err).includes("playwright")) {
+    if (String(err).includes("Cannot find module") || String(err).includes("playwright") || String(err).includes("Executable doesn't exist")) {
       playwrightAvailable = false;
-      return { name: "Unknown", price: null, platform, url, scrapedAt: new Date().toISOString(), error: "Playwright not installed" };
+      lastPlaywrightCheck = Date.now();
+      return { name: "Unknown", price: null, platform, url, scrapedAt: new Date().toISOString(), error: "Playwright not installed - run: npx playwright install chromium" };
     }
     return {
       name: "Unknown",
@@ -145,9 +157,11 @@ export async function scrapeWithBrowser(url: string, platform: string): Promise<
 export async function searchWithBrowser(query: string, platform: string): Promise<ScrapeResult> {
   const searchUrls: Record<string, string> = {
     flipkart: `https://www.flipkart.com/search?q=${encodeURIComponent(query)}`,
-    croma: `https://www.croma.com/searchB?q=${encodeURIComponent(query)}`,
+    croma: `https://www.croma.com/search/?text=${encodeURIComponent(query)}`,
     ajio: `https://www.ajio.com/search/?text=${encodeURIComponent(query)}`,
-    vijaysales: `https://www.vijaysales.com/search?q=${encodeURIComponent(query)}`,
+    vijaysales: `https://www.vijaysales.com/search-listing?q=${encodeURIComponent(query)}`,
+    tatacliq: `https://www.tatacliq.com/search/?searchCategory=all&text=${encodeURIComponent(query)}`,
+    snapdeal: `https://www.snapdeal.com/search?keyword=${encodeURIComponent(query)}&sort=rlvncy`,
   };
 
   const url = searchUrls[platform.toLowerCase()];
@@ -157,6 +171,7 @@ export async function searchWithBrowser(query: string, platform: string): Promis
 
   const displayNames: Record<string, string> = {
     flipkart: "Flipkart", croma: "Croma", ajio: "AJIO", vijaysales: "Vijay Sales",
+    tatacliq: "Tata CLiQ", snapdeal: "Snapdeal",
   };
 
   const result = await scrapeWithBrowser(url, displayNames[platform.toLowerCase()] || platform);
