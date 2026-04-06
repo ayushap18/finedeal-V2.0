@@ -1,6 +1,7 @@
 import { getDb } from "./sqlite-db";
 import { migrateFromJson } from "./migrate";
 import { ensureAdminKey } from "./auth";
+import { initScheduler } from "./scheduler";
 
 let _initialized = false;
 
@@ -39,4 +40,7 @@ export function initDb(): void {
     console.log(line2);
     console.log("╚══════════════════════════════════════════════════════════════════════════╝");
   }
+
+  // Wire up node-cron scheduled jobs
+  initScheduler();
 }
