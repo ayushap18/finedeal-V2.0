@@ -2,6 +2,7 @@ import { getDb } from "./sqlite-db";
 import { migrateFromJson } from "./migrate";
 import { ensureAdminKey } from "./auth";
 import { initScheduler } from "./scheduler";
+import { registerShutdownHandlers } from "./shutdown";
 
 let _initialized = false;
 
@@ -43,4 +44,7 @@ export function initDb(): void {
 
   // Wire up node-cron scheduled jobs
   initScheduler();
+
+  // Register process signal handlers for graceful shutdown
+  registerShutdownHandlers();
 }
