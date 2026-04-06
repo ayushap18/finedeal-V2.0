@@ -1,16 +1,30 @@
-import fs from "fs";
-import path from "path";
-import { getSeedData } from "./seed";
+import { getDb } from "./sqlite-db";
+import { migrateFromJson } from "./migrate";
 
-const DB_PATH = path.join(process.cwd(), "data", "db.json");
-const DATA_DIR = path.dirname(DB_PATH);
+let _initialized = false;
 
 export function initDb(): void {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(DB_PATH)) {
-    const seed = getSeedData();
-    fs.writeFileSync(DB_PATH, JSON.stringify(seed, null, 2), "utf-8");
+  if (_initialized) return;
+  _initialized = true;
+
+  // Ensure the SQLite database exists with the full schema
+  getDb();
+
+  // Migrate data from db.json if it hasn't been done yet
+  const result = migrateFromJson();
+
+  if (result.migrated) {
+    const { products, price_history, alerts, system_logs, settings } =
+      result.counts;
+    console.log(
+      `[init-db] Migration from db.json completed: ` +
+        `${products} products, ${price_history} price_history rows, ` +
+        `${alerts} alerts, ${system_logs} system_logs, ${settings} settings keys`
+    );
+    console.log("[init-db] Original db.json renamed to db.json.bak");
+  } else {
+    console.log(
+      "[init-db] SQLite database ready (no migration needed)"
+    );
   }
 }
