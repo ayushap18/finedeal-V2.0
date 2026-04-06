@@ -142,12 +142,50 @@ function extractAmazon(html: string, url: string): ScrapeResult {
     extractFirst(html, /<title[^>]*>([\s\S]*?)<\/title>/i) ??
     "Unknown Product";
 
-  // Price: <span class="a-price-whole">1,299</span>
-  const priceRaw =
-    extractFirst(html, /<span[^>]*class="a-price-whole"[^>]*>([^<]+)<\/span>/i) ??
-    extractFirst(html, /<span[^>]*class="a-offscreen"[^>]*>([^<]+)<\/span>/i) ??
-    extractFirst(html, /<span[^>]*id="priceblock_dealprice"[^>]*>([^<]+)<\/span>/i) ??
-    extractFirst(html, /<span[^>]*id="priceblock_ourprice"[^>]*>([^<]+)<\/span>/i);
+  // Price extraction: prioritize selling price over MRP
+  // Amazon structure: priceToPay contains the actual selling price,
+  // while a-text-price/basisPrice contains the crossed-out MRP
+  let priceRaw: string | null = null;
+
+  // Strategy 1: Look for selling price in priceToPay or deal price blocks
+  priceRaw =
+    extractFirst(html, /class="priceToPay"[\s\S]*?class="a-offscreen"[^>]*>([^<]+)</i) ??
+    extractFirst(html, /id="priceblock_dealprice"[^>]*>([^<]+)<\/span>/i) ??
+    extractFirst(html, /id="priceblock_ourprice"[^>]*>([^<]+)<\/span>/i) ??
+    extractFirst(html, /id="tp_price_block_total_price_ww"[\s\S]*?class="a-offscreen"[^>]*>([^<]+)</i);
+
+  // Strategy 2: Look for price in corePrice section but EXCLUDE basisPrice (MRP)
+  if (!priceRaw) {
+    // Extract the corePrice section and find the first non-MRP price
+    const corePriceMatch = html.match(/id="corePrice[^"]*"([\s\S]*?)(?=<div[^>]*id="[^c]|$)/i);
+    if (corePriceMatch) {
+      const section = corePriceMatch[1];
+      // Remove basisPrice/MRP sections before extracting
+      const withoutMrp = section.replace(/class="[^"]*(?:basisPrice|a-text-price)[^"]*"[\s\S]*?<\/span>/gi, "");
+      priceRaw = extractFirst(withoutMrp, /class="a-offscreen"[^>]*>([^<]+)</i) ??
+        extractFirst(withoutMrp, /class="a-price-whole"[^>]*>([^<]+)<\/span>/i);
+    }
+  }
+
+  // Strategy 3: JSON-LD structured data (usually has correct selling price)
+  if (!priceRaw) {
+    const jsonLdMatch = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/i);
+    if (jsonLdMatch) {
+      try {
+        const ld = JSON.parse(jsonLdMatch[1]);
+        const offers = ld.offers || (Array.isArray(ld) ? ld.find((x: Record<string, unknown>) => x.offers)?.offers : null);
+        if (offers) {
+          const p = offers.price || offers.lowPrice;
+          if (p) priceRaw = String(p);
+        }
+      } catch { /* not valid JSON-LD */ }
+    }
+  }
+
+  // Strategy 4: Last resort - first a-price-whole (may be MRP on some pages)
+  if (!priceRaw) {
+    priceRaw = extractFirst(html, /<span[^>]*class="a-price-whole"[^>]*>([^<]+)<\/span>/i);
+  }
 
   return {
     name: name.replace(/\s+/g, " ").trim(),
@@ -348,31 +386,95 @@ const SEARCH_URLS: Record<PlatformKey, (q: string) => string> = {
 // Extract first result from search pages
 
 function parseAmazonSearch(html: string, query: string): ScrapeResult {
-  // Look for first product in search results
+  // Extract all search result cards and find the best match for the query
+  const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+
+  // Pattern: each result card has a product title span and a price block
+  // Title: <span class="a-size-medium ... a-text-normal"><span>PRODUCT NAME</span></span>
+  // Price: <span class="a-price" data-a-size="xl"...><span class="a-offscreen">₹XX,XXX</span>
+  // Link: /dp/ASIN
+
+  // Extract product cards using data-asin (each search result has a unique ASIN)
+  const cardPattern = /<div\s+data-asin="([A-Z0-9]{10})"[^>]*>([\s\S]*?)(?=<div\s+data-asin="[A-Z0-9]{10}"|$)/gi;
+  interface CardInfo { asin: string; name: string; price: number; score: number }
+  const cards: CardInfo[] = [];
+
+  let cardMatch;
+  while ((cardMatch = cardPattern.exec(html)) !== null) {
+    const asin = cardMatch[1];
+    const cardHtml = cardMatch[2];
+
+    // Extract product name from the card
+    const nameMatch = cardHtml.match(/a-text-normal[^>]*>(?:<span>)?([^<]+)/i);
+    const name = nameMatch ? nameMatch[1].replace(/\s+/g, " ").trim() : "";
+
+    // Extract selling price (first a-price block, which is the selling price; MRP comes after in a-text-price)
+    const priceMatch = cardHtml.match(/class="a-price"[^>]*>[\s\S]*?class="a-offscreen">([^<]+)/i);
+    const price = priceMatch ? cleanPrice(priceMatch[1]) : null;
+
+    if (!name || !price) continue;
+
+    // Score how well this product matches the query
+    const nameLower = name.toLowerCase();
+    const queryLower = query.toLowerCase();
+    let score = 0;
+
+    // Match individual words
+    const matchedWords = queryWords.filter(w => nameLower.includes(w));
+    score = matchedWords.length / queryWords.length;
+
+    // Bonus: match numeric specs like "2 Ton", "3 Star", "1.5 Ton" as phrases
+    const specPatterns = queryLower.match(/\d+\.?\d*\s*(?:ton|star|gb|tb|inch|cm|kg|watt|hp)/gi) || [];
+    for (const spec of specPatterns) {
+      if (nameLower.includes(spec.trim())) {
+        score += 0.15; // bonus for exact spec match
+      } else {
+        score -= 0.1; // penalty for spec mismatch (e.g., query says "2 Ton" but result says "1 Ton")
+      }
+    }
+
+    cards.push({ asin, name, price, score });
+  }
+
+  // Pick the best matching card (highest score, then lowest price for ties)
+  cards.sort((a, b) => b.score - a.score || a.price - b.price);
+  const best = cards[0];
+
+  if (best && best.score >= 0.3) {
+    return {
+      name: best.name,
+      price: best.price,
+      platform: "Amazon.in",
+      url: `https://www.amazon.in/dp/${best.asin}`,
+      scrapedAt: new Date().toISOString(),
+    };
+  }
+
+  // Fallback: first product with a price
+  const fallbackCard = cards[0];
+  if (fallbackCard) {
+    return {
+      name: fallbackCard.name,
+      price: fallbackCard.price,
+      platform: "Amazon.in",
+      url: `https://www.amazon.in/dp/${fallbackCard.asin}`,
+      scrapedAt: new Date().toISOString(),
+    };
+  }
+
+  // Last resort: old regex approach
   const nameRaw =
-    extractFirst(
-      html,
-      /<span[^>]*class="a-size-medium[^"]*a-text-normal[^"]*"[^>]*>([\s\S]*?)<\/span>/i
-    ) ??
-    extractFirst(
-      html,
-      /<span[^>]*class="a-size-base-plus[^"]*a-text-normal[^"]*"[^>]*>([\s\S]*?)<\/span>/i
-    );
-
+    extractFirst(html, /<span[^>]*class="a-size-medium[^"]*a-text-normal[^"]*"[^>]*>([\s\S]*?)<\/span>/i);
   const priceRaw =
-    extractFirst(html, /<span[^>]*class="a-price-whole"[^>]*>([^<]+)<\/span>/i) ??
-    extractFirst(html, /<span[^>]*class="a-offscreen"[^>]*>([^<]+)<\/span>/i);
-
+    extractFirst(html, /class="a-price"(?![^>]*a-text-price)[^>]*>[\s\S]*?class="a-offscreen"[^>]*>([^<]+)/i) ??
+    extractFirst(html, /<span[^>]*class="a-price-whole"[^>]*>([^<]+)<\/span>/i);
   const linkMatch = /\/dp\/([A-Z0-9]{10})/.exec(html);
-  const productUrl = linkMatch
-    ? `https://www.amazon.in/dp/${linkMatch[1]}`
-    : `https://www.amazon.in/s?k=${encodeURIComponent(query)}`;
 
   return {
-    name: nameRaw?.replace(/\s+/g, " ").trim() ?? query,
+    name: nameRaw?.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim() ?? query,
     price: priceRaw ? cleanPrice(priceRaw) : null,
     platform: "Amazon.in",
-    url: productUrl,
+    url: linkMatch ? `https://www.amazon.in/dp/${linkMatch[1]}` : `https://www.amazon.in/s?k=${encodeURIComponent(query)}`,
     scrapedAt: new Date().toISOString(),
   };
 }

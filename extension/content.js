@@ -9,13 +9,17 @@
       selectors: {
         title: ['#productTitle', '#title span', '.product-title-word-break'],
         price: [
-          '#priceblock_ourprice',
+          // Selling/deal price selectors FIRST (these are the actual price you pay)
+          '.priceToPay .a-offscreen',
+          '#corePrice_feature_div .priceToPay .a-offscreen',
+          '#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen',
           '#priceblock_dealprice',
-          '.a-price .a-offscreen',
-          '.a-price-whole',
-          '#corePrice_feature_div .a-offscreen',
+          '#priceblock_ourprice',
           '#tp_price_block_total_price_ww .a-offscreen',
-          '.priceToPay .a-offscreen'
+          '#corePrice_feature_div .a-offscreen',
+          // Generic fallbacks LAST (these may match MRP)
+          '.a-price:not(.a-text-price) .a-offscreen',
+          '.a-price-whole'
         ],
         image: ['#landingImage', '#imgBlkFront', '#main-image-container img'],
         brand: ['#bylineInfo', '.po-brand .po-break-word'],
@@ -194,13 +198,49 @@
     };
   }
 
+  function extractAmazonSellingPrice() {
+    // Amazon-specific: get the actual selling price, NOT the MRP
+    // The selling price is inside .priceToPay or the first .a-price that isn't strikethrough
+    const sellingSelectors = [
+      '.priceToPay .a-offscreen',
+      '#corePrice_feature_div .priceToPay .a-offscreen',
+      '#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen',
+      '#priceblock_dealprice',
+      '#priceblock_ourprice',
+      '#tp_price_block_total_price_ww .a-offscreen',
+    ];
+    for (const sel of sellingSelectors) {
+      const el = document.querySelector(sel);
+      if (el) {
+        const p = parsePrice(el.textContent);
+        if (p > 0) return p;
+      }
+    }
+    // Fallback: find .a-price elements that are NOT inside .basisPrice (MRP container)
+    const allPrices = document.querySelectorAll('.a-price:not(.a-text-price) .a-offscreen');
+    for (const el of allPrices) {
+      if (el.closest('.basisPrice') || el.closest('.a-text-price')) continue;
+      const p = parsePrice(el.textContent);
+      if (p > 0) return p;
+    }
+    return 0;
+  }
+
   function extractProductInfo(siteConfig) {
     const title = extractText(siteConfig.selectors.title);
-    const priceRaw = extractText(siteConfig.selectors.price);
-    const price = parsePrice(priceRaw);
     const image = extractImage(siteConfig.selectors.image);
     const brand = extractText(siteConfig.selectors.brand);
     const category = extractText(siteConfig.selectors.category);
+
+    // Use Amazon-specific price extraction to avoid picking MRP
+    let price = 0;
+    const hostname = window.location.hostname.replace('www.', '');
+    if (hostname.includes('amazon.in')) {
+      price = extractAmazonSellingPrice();
+    } else {
+      const priceRaw = extractText(siteConfig.selectors.price);
+      price = parsePrice(priceRaw);
+    }
 
     if (!title && !price) {
       return extractWithMeta();

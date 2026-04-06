@@ -8,50 +8,60 @@ import { generateDealSummary, analyzeScrapedPrices } from "@/lib/ai";
  * Clean a raw product title into a short, searchable query.
  * E.g. "iPhone 17 Pro 256 GB: 15.93 cm (6.3″) Display with Promotion up to 120Hz, A19 Pr"
  *   → "iPhone 17 Pro 256GB"
+ * E.g. "Godrej 2 Ton 3 Star, 5 Years Warranty, 5-In-1 Convertible, Inverter Split AC (Copper...)"
+ *   → "Godrej 2 Ton 3 Star Inverter Split AC"
  */
 function cleanSearchQuery(raw: string): string {
   let q = raw;
 
-  // Remove everything after common separators that start spec/promo text
+  // Remove everything after colon/pipe that starts spec text
   q = q.split(/[:\|–—]/).slice(0, 1).join("").trim();
 
-  // Remove parenthetical content like (6.3″), (Black), (2026)
+  // Remove parenthetical content (specs, colors, model numbers)
   q = q.replace(/\(([^)]*)\)/g, (_, inner) => {
-    // Keep color/variant if short
-    if (inner.length <= 12 && !/cm|inch|display|Hz/i.test(inner)) return `(${inner})`;
+    // Keep short color/variant names
+    if (inner.length <= 10 && !/cm|inch|display|Hz|copper|white|black/i.test(inner)) return `(${inner})`;
     return "";
   });
 
-  // Remove common spec phrases
+  // Remove common noise phrases
   q = q.replace(/\b\d+(\.\d+)?\s*(cm|inch|inches|mm)\b/gi, "");
   q = q.replace(/\b\d+\s*Hz\b/gi, "");
-  q = q.replace(/\bdisplay\b/gi, "");
-  q = q.replace(/\bwith\s+promotion\b/gi, "");
-  q = q.replace(/\bup\s+to\b/gi, "");
-  q = q.replace(/\b(launched|latest|new|best|buy)\b/gi, "");
-  q = q.replace(/\b[A-Z]\d{1,2}\s*(Pro|Max|Ultra|Chip)?\b/g, (m) => {
-    // Keep if it looks like a model (e.g. "S24", "A16") but remove processor names like "A19 Pr"
-    if (/^[A-Z]\d{1,2}\s*(Pr|Pro\s*chip|Bionic|Fusion)/i.test(m)) return "";
-    return m;
-  });
+  q = q.replace(/\b(display|with\s+promotion|up\s+to|launched|latest|new|best|buy)\b/gi, "");
+  q = q.replace(/\b[A-Z]\d{1,2}\s*(Pr|Pro\s*chip|Bionic|Fusion)/gi, "");
 
-  // Normalize storage: "256 GB" → "256GB"
+  // Remove warranty/feature/marketing clauses (common in Amazon titles after commas)
+  q = q.replace(/,?\s*\d+\s*years?\s*(comprehensive\s*)?warranty[^,]*/gi, "");
+  q = q.replace(/,?\s*(convertible\s*cooling|i-sense|dustbuster|wi-?fi|smart\s*energy)[^,]*/gi, "");
+  q = q.replace(/\b\d+-in-1\s*(convertible)?\b/gi, "");
+  q = q.replace(/\bai\s*powered\b/gi, "");
+
+  // Normalize storage
   q = q.replace(/(\d+)\s*GB/gi, "$1GB");
   q = q.replace(/(\d+)\s*TB/gi, "$1TB");
 
-  // Collapse whitespace
-  q = q.replace(/\s{2,}/g, " ").trim();
+  // Collapse whitespace and commas
+  q = q.replace(/\s{2,}/g, " ").replace(/,\s*,/g, ",").trim();
 
-  // If still too long, take first 6 words (usually brand + model + variant)
+  // Smart truncation: keep meaningful words, especially product type keywords
   const words = q.split(/\s+/);
-  if (words.length > 6) {
-    q = words.slice(0, 6).join(" ");
+  if (words.length > 8) {
+    // Find the product type keyword (AC, TV, Phone, Laptop, etc.) and include it
+    const productTypes = /\b(AC|TV|LED|LCD|Phone|Laptop|Tablet|Headphone|Speaker|Refrigerator|Washer|Dryer|Oven|Monitor)\b/i;
+    const typeIdx = words.findIndex(w => productTypes.test(w));
+
+    if (typeIdx >= 0 && typeIdx <= 12) {
+      // Take words up to and including the product type
+      q = words.slice(0, typeIdx + 1).join(" ");
+    } else {
+      q = words.slice(0, 8).join(" ");
+    }
   }
 
-  // Final trim of trailing punctuation
+  // Final cleanup: trailing punctuation and commas
   q = q.replace(/[,;.\s]+$/, "").trim();
 
-  return q || raw.substring(0, 40);
+  return q || raw.substring(0, 50);
 }
 
 let scraperStatus: {
