@@ -167,22 +167,40 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // === PHASE 1.5: Price variance filter ===
+    // === PHASE 1.5: Accessory/wrong-product filter ===
+    // Detect accessories (cases, covers, chargers, screen guards) that match the query by accident
+    if (cleanedQuery) {
+      const accessoryKeywords = ["case", "cover", "skin", "protector", "guard", "tempered", "charger", "cable", "adapter", "stand", "mount", "holder", "pouch", "bag", "sleeve", "sticker", "decal", "film"];
+      const queryLower = cleanedQuery.toLowerCase();
+      const isQueryAccessory = accessoryKeywords.some(k => queryLower.includes(k));
+      if (!isQueryAccessory) {
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          if (!r.price || !r.name) continue;
+          const nameLower = r.name.toLowerCase();
+          if (accessoryKeywords.some(k => nameLower.includes(k))) {
+            results[i] = { ...r, price: null, error: `Rejected: accessory/case "${r.name.substring(0, 50)}" for main product query` };
+          }
+        }
+      }
+    }
+
+    // === PHASE 1.6: Price variance filter ===
     // Reject prices that are suspiciously far from the cluster of similar prices
     const validPrices = results.filter(r => r.price && r.price > 0).map(r => r.price!);
-    if (validPrices.length >= 3) {
+    if (validPrices.length >= 2) {
       validPrices.sort((a, b) => a - b);
       const median = validPrices[Math.floor(validPrices.length / 2)];
+      // With only 2 prices, use a wider threshold but still catch 100x differences
+      const lowThreshold = validPrices.length >= 3 ? 0.4 : 0.1; // 60% below median or 90% below for 2 prices
+      const highThreshold = validPrices.length >= 3 ? 4 : 10; // 300% above or 900% above for 2 prices
       for (let i = 0; i < results.length; i++) {
         const r = results[i];
         if (r.price) {
-          // Reject if price is >60% below median (likely wrong product/accessory)
-          if (r.price < median * 0.4) {
-            results[i] = { ...r, price: null, error: `Suspicious price ₹${r.price} (60%+ below median ₹${median}) - likely wrong product` };
-          }
-          // Reject if price is >300% above median (likely wrong product/bundle)
-          else if (r.price > median * 4) {
-            results[i] = { ...r, price: null, error: `Suspicious price ₹${r.price} (300%+ above median ₹${median}) - likely wrong product` };
+          if (r.price < median * lowThreshold) {
+            results[i] = { ...r, price: null, error: `Suspicious price ₹${r.price} (far below median ₹${median}) - likely wrong product` };
+          } else if (r.price > median * highThreshold) {
+            results[i] = { ...r, price: null, error: `Suspicious price ₹${r.price} (far above median ₹${median}) - likely wrong product` };
           }
         }
       }

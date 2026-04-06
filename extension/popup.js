@@ -3,6 +3,8 @@
 (function () {
   'use strict';
 
+  const API_BASE = 'http://localhost:3000/api';
+
   // ===== State =====
   let currentProduct = null;
   let comparisonResults = null;
@@ -215,8 +217,13 @@
         renderResults();
         showScreen('results');
       } else {
-        alert('Search timed out. The server may be busy. Please try again.');
+        // Show friendly inline error instead of ugly alert()
         showScreen('detected');
+        const errBanner = document.createElement('div');
+        errBanner.style.cssText = 'background:#F8717120;color:#F87171;padding:10px 12px;border-radius:8px;text-align:center;margin:8px 12px;font-size:12px;';
+        errBanner.textContent = 'Search timed out. Make sure the server is running and try again.';
+        document.querySelector('#screen-detected .content').prepend(errBanner);
+        setTimeout(() => errBanner.remove(), 5000);
       }
       return;
     }
@@ -450,7 +457,7 @@
     if (history && history.length >= 2 && currentProduct?.title) {
       const predEl = document.getElementById('pred-text');
       predEl.textContent = (prediction?.message || '') + ' Asking Gemini AI...';
-      fetch('http://localhost:3000/api/ai', {
+      fetch(`${API_BASE}/ai`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
