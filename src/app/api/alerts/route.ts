@@ -1,28 +1,61 @@
 import { NextRequest } from "next/server";
-import { getAll, create, getById } from "@/lib/db";
-import { corsJson, corsError, handleOptions } from "@/lib/api-helpers";
+import { getAll, getAllPaginated, create, getById } from "@/lib/db";
+import {
+  corsJson,
+  corsError,
+  handleOptions,
+  parsePagination,
+} from "@/lib/api-helpers";
 import { checkAlerts, checkSingleAlert } from "@/lib/alert-checker";
+import { validate, alertSchema } from "@/lib/validate";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const alerts = getAll("alerts");
+    const { page, limit } = parsePagination(req);
+    const result = getAllPaginated("alerts", { page, limit });
+
+    // Compute stats from the full collection (not just the current page)
+    const allAlerts = getAll("alerts");
     const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+    const todayStart = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate()
+    ).toISOString();
 
-    const active = alerts.filter((a) => a.status === "active").length;
-    const triggeredToday = alerts.filter(
-      (a) => a.status === "triggered" && a.triggered_at && (a.triggered_at as string) >= todayStart
+    const active = allAlerts.filter((a) => a.status === "active").length;
+    const triggeredToday = allAlerts.filter(
+      (a) =>
+        a.status === "triggered" &&
+        a.triggered_at &&
+        (a.triggered_at as string) >= todayStart
     ).length;
-    const emailSent = alerts.filter((a) => a.notify_email && a.status === "triggered").length;
-    const telegramSent = alerts.filter((a) => a.notify_telegram && a.status === "triggered").length;
+    const emailSent = allAlerts.filter(
+      (a) => a.notify_email && a.status === "triggered"
+    ).length;
+    const telegramSent = allAlerts.filter(
+      (a) => a.notify_telegram && a.status === "triggered"
+    ).length;
 
-    return corsJson({
-      alerts,
-      stats: { active, triggered_today: triggeredToday, email_sent: emailSent, telegram_sent: telegramSent },
-      total: alerts.length,
-    });
-  } catch (e) {
-    return corsError("Failed to fetch alerts", 500);
+    return corsJson(
+      {
+        alerts: result.data,
+        stats: {
+          active,
+          triggered_today: triggeredToday,
+          email_sent: emailSent,
+          telegram_sent: telegramSent,
+        },
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+        totalPages: result.totalPages,
+      },
+      200,
+      req
+    );
+  } catch {
+    return corsError("Failed to fetch alerts", 500, req);
   }
 }
 
@@ -30,25 +63,28 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    // Manual trigger: check all active alerts
+    // Manual trigger: check all active alerts (no schema validation needed)
     if (body.action === "check-all") {
       const results = await checkAlerts();
       return corsJson({
         message: `Checked ${results.checked} alerts, ${results.triggered} triggered`,
         ...results,
-      });
+      }, 200, req);
     }
 
-    // Create a new alert
-    if (!body.product_id || !body.alert_type) {
-      return corsError("product_id and alert_type are required");
+    // Validate body with alertSchema
+    const validation = validate(body, alertSchema);
+    if (!validation.valid) {
+      return corsJson({ errors: validation.errors }, 400, req);
     }
+
+    const validated = validation.data;
 
     // Auto-fill product info if not provided
     let productName = body.product_name;
     let platform = body.platform;
     let currentPrice = body.current_price;
-    const product = getById("products", body.product_id);
+    const product = getById("products", validated.product_id as string);
     if (product) {
       productName = productName || product.name;
       platform = platform || product.platform;
@@ -57,6 +93,7 @@ export async function POST(req: NextRequest) {
 
     const alert = create("alerts", {
       ...body,
+      ...validated,
       product_name: productName,
       platform,
       current_price: currentPrice,
@@ -76,12 +113,12 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    return corsJson({ alert, immediate_check: immediateCheck }, 201);
-  } catch (e) {
-    return corsError("Failed to create alert", 500);
+    return corsJson({ alert, immediate_check: immediateCheck }, 201, req);
+  } catch {
+    return corsError("Failed to create alert", 500, req);
   }
 }
 
-export async function OPTIONS() {
-  return handleOptions();
+export async function OPTIONS(req: NextRequest) {
+  return handleOptions(req);
 }

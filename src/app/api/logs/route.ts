@@ -1,23 +1,55 @@
 import { NextRequest } from "next/server";
-import { getAll, create, clearCollection } from "@/lib/db";
-import { corsJson, corsError, handleOptions, parseSearchParams } from "@/lib/api-helpers";
+import { getAll, getAllPaginated, create, clearCollection } from "@/lib/db";
+import {
+  corsJson,
+  corsError,
+  handleOptions,
+  parseSearchParams,
+  parsePagination,
+} from "@/lib/api-helpers";
 
 export async function GET(req: NextRequest) {
   try {
     const { level } = parseSearchParams(req);
-    let logs = getAll("system_logs");
+    const { page, limit } = parsePagination(req);
 
     if (level && level !== "all") {
+      // Level filter — fetch all matching rows, then paginate in memory
       const normalizedLevel = level.toLowerCase();
-      logs = logs.filter((l) => (l.level as string).toLowerCase() === normalizedLevel);
+      const allLogs = getAll("system_logs").filter(
+        (l) => (l.level as string).toLowerCase() === normalizedLevel
+      );
+
+      // getAll already returns DESC by created_at, but sort explicitly to be safe
+      allLogs.sort(
+        (a, b) =>
+          new Date(b.created_at as string).getTime() -
+          new Date(a.created_at as string).getTime()
+      );
+
+      const total = allLogs.length;
+      const offset = (page - 1) * limit;
+      const logs = allLogs.slice(offset, offset + limit);
+      const totalPages = Math.ceil(total / limit) || 1;
+
+      return corsJson({ logs, total, page, limit, totalPages }, 200, req);
     }
 
-    // Sort newest first
-    logs.sort((a, b) => new Date(b.created_at as string).getTime() - new Date(a.created_at as string).getTime());
-
-    return corsJson({ logs, total: logs.length });
-  } catch (e) {
-    return corsError("Failed to fetch logs", 500);
+    // No level filter — use paginated DB query (sorted DESC by created_at)
+    const result = getAllPaginated("system_logs", { page, limit });
+    return corsJson(
+      {
+        logs: result.data,
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+        totalPages: result.totalPages,
+      },
+      200,
+      req
+    );
+  } catch {
+    return corsError("Failed to fetch logs", 500, req);
   }
 }
 
@@ -25,7 +57,7 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     if (!body.level || !body.message) {
-      return corsError("level and message are required");
+      return corsError("level and message are required", 400, req);
     }
     const log = create("system_logs", {
       level: body.level,
@@ -33,21 +65,21 @@ export async function POST(req: NextRequest) {
       source: body.source || "api",
       details: body.details || "",
     });
-    return corsJson({ log }, 201);
-  } catch (e) {
-    return corsError("Failed to create log", 500);
+    return corsJson({ log }, 201, req);
+  } catch {
+    return corsError("Failed to create log", 500, req);
   }
 }
 
-export async function DELETE() {
+export async function DELETE(req: NextRequest) {
   try {
     clearCollection("system_logs");
-    return corsJson({ message: "All logs cleared" });
-  } catch (e) {
-    return corsError("Failed to clear logs", 500);
+    return corsJson({ message: "All logs cleared" }, 200, req);
+  } catch {
+    return corsError("Failed to clear logs", 500, req);
   }
 }
 
-export async function OPTIONS() {
-  return handleOptions();
+export async function OPTIONS(req: NextRequest) {
+  return handleOptions(req);
 }
