@@ -121,99 +121,111 @@ function upgradeTls(
 }
 
 /**
- * Send an email via raw SMTP with STARTTLS to smtp-relay.brevo.com:587.
+ * Send an email via SMTP.
+ * Supports both:
+ *   - Port 465 (implicit TLS/SSL) - direct TLS connection
+ *   - Port 587 (STARTTLS) - plain connect then upgrade to TLS
  */
 export async function sendSmtpEmail(
   to: string,
   subject: string,
   htmlBody: string
 ): Promise<SmtpResult> {
-  const host = getEnvLocal("SMTP_HOST") || "smtp-relay.brevo.com";
-  const port = parseInt(getEnvLocal("SMTP_PORT") || "587", 10);
+  const host = getEnvLocal("SMTP_HOST") || "server.dnspark.in";
+  const port = parseInt(getEnvLocal("SMTP_PORT") || "465", 10);
   const user = getEnvLocal("SMTP_USER");
   const pass = getEnvLocal("SMTP_PASS");
+  const useImplicitTls = getEnvLocal("SMTP_SECURE") === "true" || port === 465;
 
   if (!user || !pass) {
     return { success: false, error: "SMTP credentials not configured" };
   }
 
-  const TIMEOUT = 10_000;
-  const messageId = `<${Date.now()}.${Math.random().toString(36).slice(2)}@finedeal.app>`;
+  const TIMEOUT = 15_000;
+  const messageId = `<${Date.now()}.${Math.random().toString(36).slice(2)}@codecatalysts.tech>`;
 
   let plainSock: net.Socket | null = null;
   let tlsSock: tls.TLSSocket | null = null;
 
   try {
-    // 1. Connect
-    plainSock = await new Promise<net.Socket>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error("SMTP connect timeout")),
-        TIMEOUT
-      );
-      const s = net.createConnection({ host, port }, () => {
-        clearTimeout(timer);
-        resolve(s);
-      });
-      s.on("error", (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-    });
+    let activeSock: net.Socket | tls.TLSSocket;
 
-    // 2. Read 220 greeting
-    const greeting = await readResponse(plainSock, TIMEOUT);
+    if (useImplicitTls) {
+      // Port 465: Direct TLS connection (no STARTTLS needed)
+      tlsSock = await new Promise<tls.TLSSocket>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("SMTP TLS connect timeout")), TIMEOUT);
+        const s = tls.connect({ host, port, rejectUnauthorized: false }, () => {
+          clearTimeout(timer);
+          resolve(s);
+        });
+        s.on("error", (err) => { clearTimeout(timer); reject(err); });
+      });
+      activeSock = tlsSock;
+    } else {
+      // Port 587: Plain connection + STARTTLS upgrade
+      plainSock = await new Promise<net.Socket>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("SMTP connect timeout")), TIMEOUT);
+        const s = net.createConnection({ host, port }, () => { clearTimeout(timer); resolve(s); });
+        s.on("error", (err) => { clearTimeout(timer); reject(err); });
+      });
+      activeSock = plainSock;
+    }
+
+    // Read 220 greeting
+    const greeting = await readResponse(activeSock, TIMEOUT);
     expectCode(greeting, 220);
 
-    // 3. EHLO
-    await sendCommand(plainSock, "EHLO finedeal.app");
-    const ehlo1 = await readResponse(plainSock, TIMEOUT);
+    // EHLO
+    await sendCommand(activeSock, "EHLO finedeal.app");
+    const ehlo1 = await readResponse(activeSock, TIMEOUT);
     expectCode(ehlo1, 250);
 
-    // 4. STARTTLS
-    await sendCommand(plainSock, "STARTTLS");
-    const starttlsResp = await readResponse(plainSock, TIMEOUT);
-    expectCode(starttlsResp, 220);
+    // STARTTLS (only for port 587)
+    if (!useImplicitTls && plainSock) {
+      await sendCommand(plainSock, "STARTTLS");
+      const starttlsResp = await readResponse(plainSock, TIMEOUT);
+      expectCode(starttlsResp, 220);
+      tlsSock = await upgradeTls(plainSock, host, TIMEOUT);
+      activeSock = tlsSock;
 
-    // 5. Upgrade to TLS
-    tlsSock = await upgradeTls(plainSock, host, TIMEOUT);
+      // Re-EHLO over TLS
+      await sendCommand(activeSock, "EHLO finedeal.app");
+      const ehlo2 = await readResponse(activeSock, TIMEOUT);
+      expectCode(ehlo2, 250);
+    }
 
-    // 6. Re-EHLO over TLS
-    await sendCommand(tlsSock, "EHLO finedeal.app");
-    const ehlo2 = await readResponse(tlsSock, TIMEOUT);
-    expectCode(ehlo2, 250);
-
-    // 7. AUTH LOGIN
-    await sendCommand(tlsSock, "AUTH LOGIN");
-    const authResp = await readResponse(tlsSock, TIMEOUT);
+    // AUTH LOGIN
+    await sendCommand(activeSock, "AUTH LOGIN");
+    const authResp = await readResponse(activeSock, TIMEOUT);
     expectCode(authResp, 334);
 
-    await sendCommand(tlsSock, Buffer.from(user).toString("base64"));
-    const userResp = await readResponse(tlsSock, TIMEOUT);
+    await sendCommand(activeSock, Buffer.from(user).toString("base64"));
+    const userResp = await readResponse(activeSock, TIMEOUT);
     expectCode(userResp, 334);
 
-    await sendCommand(tlsSock, Buffer.from(pass).toString("base64"));
-    const passResp = await readResponse(tlsSock, TIMEOUT);
+    await sendCommand(activeSock, Buffer.from(pass).toString("base64"));
+    const passResp = await readResponse(activeSock, TIMEOUT);
     expectCode(passResp, 235);
 
-    // 8. MAIL FROM
-    await sendCommand(tlsSock, `MAIL FROM:<${user}>`);
-    const fromResp = await readResponse(tlsSock, TIMEOUT);
+    // MAIL FROM
+    await sendCommand(activeSock, `MAIL FROM:<${user}>`);
+    const fromResp = await readResponse(activeSock, TIMEOUT);
     expectCode(fromResp, 250);
 
-    // 9. RCPT TO
-    await sendCommand(tlsSock, `RCPT TO:<${to}>`);
-    const rcptResp = await readResponse(tlsSock, TIMEOUT);
+    // RCPT TO
+    await sendCommand(activeSock, `RCPT TO:<${to}>`);
+    const rcptResp = await readResponse(activeSock, TIMEOUT);
     expectCode(rcptResp, 250);
 
-    // 10. DATA
-    await sendCommand(tlsSock, "DATA");
-    const dataResp = await readResponse(tlsSock, TIMEOUT);
+    // DATA
+    await sendCommand(activeSock, "DATA");
+    const dataResp = await readResponse(activeSock, TIMEOUT);
     expectCode(dataResp, 354);
 
-    // 11. Email content
+    // Email content
     const date = new Date().toUTCString();
     const emailContent = [
-      `From: FineDeal Alerts <${user}>`,
+      `From: FineDeal <${user}>`,
       `To: ${to}`,
       `Subject: ${subject}`,
       `Message-ID: ${messageId}`,
@@ -225,12 +237,12 @@ export async function sendSmtpEmail(
       `.`,
     ].join("\r\n");
 
-    await sendCommand(tlsSock, emailContent);
-    const endResp = await readResponse(tlsSock, TIMEOUT);
+    await sendCommand(activeSock, emailContent);
+    const endResp = await readResponse(activeSock, TIMEOUT);
     expectCode(endResp, 250);
 
-    // 12. QUIT
-    await sendCommand(tlsSock, "QUIT").catch(() => {});
+    // QUIT
+    await sendCommand(activeSock, "QUIT").catch(() => {});
 
     return { success: true, messageId };
   } catch (err) {

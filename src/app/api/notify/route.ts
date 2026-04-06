@@ -10,13 +10,15 @@ export async function POST(req: NextRequest) {
 
     if (type === "test") {
       const settings = getSettings();
+      const emailTo = to || settings.user_email || settings.smtp_user || process.env.SMTP_USER || "finedeal@codecatalysts.tech";
       const emailResult = await sendEmail(
-        settings.user_email || settings.smtp_user || "test@finedeal.app",
+        emailTo,
         "FineDeal Test Notification",
         "This is a test email from FineDeal notification system."
       );
+      const testChatId = body.chat_id || (settings.telegram_chat_id && settings.telegram_chat_id.trim()) || process.env.TELEGRAM_CHAT_ID || "";
       const telegramResult = await sendTelegram(
-        settings.telegram_chat_id,
+        testChatId,
         "🧪 <b>FineDeal Test</b>\nThis is a test message from your notification system."
       );
       return corsJson({
@@ -41,7 +43,7 @@ export async function POST(req: NextRequest) {
       if (!message) return corsError("message is required");
 
       const settings = getSettings();
-      const chatId = body.chat_id || settings.telegram_chat_id;
+      const chatId = body.chat_id || (settings.telegram_chat_id && settings.telegram_chat_id.trim()) || process.env.TELEGRAM_CHAT_ID || "";
       const result = await sendTelegram(chatId, message);
       return result.success
         ? corsJson({ message: "Telegram message sent successfully", type: "telegram", result })

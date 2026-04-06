@@ -108,7 +108,7 @@ export async function sendTelegram(
     const settings = getSettings();
     const token =
       getEnvLocal("TELEGRAM_BOT_TOKEN") || settings.telegram_bot_token;
-    const targetChatId = chatId || getEnvLocal("TELEGRAM_CHAT_ID") || settings.telegram_chat_id;
+    const targetChatId = (chatId && chatId.trim()) || getEnvLocal("TELEGRAM_CHAT_ID") || settings.telegram_chat_id || "";
 
     if (!targetChatId) {
       return { success: false, method: "bot_api", error: "No chat ID configured. Users need to message @finedeal_bot first and provide their chat ID in Settings." };
