@@ -1,6 +1,10 @@
 import crypto from "crypto";
 import { getDb } from "./sqlite-db";
+import { initDb } from "./init-db";
 import type { Settings } from "./seed";
+
+// Ensure DB is initialized (migration, admin key, scheduler) on first import
+initDb();
 
 // ---------------------------------------------------------------------------
 // Types

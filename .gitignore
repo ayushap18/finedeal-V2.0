@@ -37,3 +37,9 @@ data/backups/
 # playwright
 /test-results/
 /playwright-report/
+
+data/finedeal.db
+data/finedeal.db-shm
+data/finedeal.db-wal
+data/db.json.bak
+.env.local copy

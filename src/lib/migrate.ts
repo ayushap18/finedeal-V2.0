@@ -93,6 +93,9 @@ export function migrateFromJson(): MigrationResult {
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `);
 
+  // Temporarily disable FK checks — legacy JSON data may have orphaned references
+  db.pragma("foreign_keys = OFF");
+
   // Run everything inside a single transaction
   const runMigration = db.transaction(() => {
     // Products
@@ -173,6 +176,9 @@ export function migrateFromJson(): MigrationResult {
   });
 
   runMigration();
+
+  // Re-enable FK checks
+  db.pragma("foreign_keys = ON");
 
   // Rename db.json → db.json.bak so migration won't re-run next time
   try {
