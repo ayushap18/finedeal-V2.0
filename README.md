@@ -1,4 +1,4 @@
-# FineDeal - AI-Powered Price Comparison Platform
+# FineDeal - AI Powered Price Comparison Platform
 
 A full-stack price comparison and deal tracking system for Indian e-commerce, featuring a Chrome extension, admin dashboard, Telegram bot, and AI-powered product analysis.
 
